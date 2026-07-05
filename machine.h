@@ -269,6 +269,8 @@ struct machine
   int aciabackendcfgport;
   int aciabackendcfgdomain;
   char aciabackendname[ACIA_BACKEND_NAME_LEN];
+
+  int gdb_port;   /* GDB RSP server port (0 = disabled) */
 };
 
 void setromon(struct machine *oric);

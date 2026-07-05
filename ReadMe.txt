@@ -171,6 +171,9 @@ Here are all the options:
                         where N is decimal or hexadecimal within the range of $31c..$3fc
                          (i.e. 796, 0x31c, $31C represent the same value)
 
+  --gdb_port N       = Enable GDB Remote Serial Protocol server on port N
+                       (0 = disabled, e.g. 6502)
+
   --serial <type>    = Set serial card back-end emulation:
                         'none' - no serial
                         'loopback' - for testing - all TX data is returned to RX
@@ -281,6 +284,12 @@ In most places where you can enter a number or address, you can pass a CPU or
 VIA register. (VIA registers are prefixed with V, e.g. VDDRA). Anywhere you can
 pass an address, you can also use a symbol.
 
+The monitor includes a full expression evaluator with correct operator precedence.
+Expressions support arithmetic operators (+, -, *, /, &, |, ^), unary operators
+(*expr for pointer dereference, -expr for negation, <expr for low byte, >expr for
+high byte), and parenthesized sub-expressions. Operands can be symbols, CPU/VIA
+register names, hex ($), decimal, or binary (%) numbers.
+
 Commands:
 
   ?                     - Help
@@ -350,6 +359,36 @@ bsm $0c00 rw       <-- Break when the CPU is about to access $0c00
 bsm $0c00 c        <-- Break after then contents of $0c00 change
 bsm $0c00 rwc      <-- Break just before the CPU accesses $0c00, or just after it
                        changes for any reason.
+
+
+
+GDB Remote Debug
+================
+
+Oricutron includes a TCP-based GDB Remote Serial Protocol (RSP) server for
+external debugger integration, such as VS Code with the OSDK debug extension.
+
+To enable, use --gdb_port NNNN on the command line or set gdb_port = NNNN in
+oricutron.cfg (0 = disabled). Once enabled, Oricutron listens for a GDB client
+connection on the specified TCP port.
+
+Capabilities:
+- Register read/write (all 6502 registers)
+- Memory read/write
+- Software breakpoints and hardware watchpoints
+- Single-step and continue execution
+- Break (interrupt) from the debugger
+
+Custom Oric query extensions (via GDB qRcmd/monitor or custom packets):
+- qOricCpuExtra    - CPU extra state: last PC, cycle count, frame count,
+                     current raster line, interrupt vectors (NMI/RST/IRQ)
+- qOricPeripherals - VIA, AY, FDC, Microdisc and ACIA register state
+- qOricCmd,<hex>   - Execute a monitor command and return its output
+- qOricEval,<hex>  - Evaluate an expression via the monitor expression
+                     evaluator and return the result
+
+These extensions allow a debug adapter to query detailed Oric hardware state
+and execute monitor commands remotely without user interaction.
 
 
 

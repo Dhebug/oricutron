@@ -90,6 +90,9 @@ void mon_state_reset(struct machine *oric);
 SDL_bool mon_getnum(struct machine *oric, unsigned int* num, char* buf, int* off, SDL_bool addrregs, SDL_bool nregs, SDL_bool viaregs, SDL_bool symbols);
 SDL_bool mon_do_cmd(char* cmd, struct machine *oric, SDL_bool *needrender);
 SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender);
+void mon_capture_start(int maxsize);
+char *mon_capture_end(void);
+SDL_bool mon_eval(struct machine *oric, unsigned int *result, char *buf, int *off);
 
 #if defined(DEBUG_CPU_TRACE) && DEBUG_CPU_TRACE > 0
 struct cpu_trace_entry

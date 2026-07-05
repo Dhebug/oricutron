@@ -67,6 +67,7 @@
 #include "tape.h"
 #include "snapshot.h"
 #include "keyboard.h"
+#include "gdb_stub.h"
 
 #ifdef _MSC_VER
 #if SDL_MAJOR_VERSION == 1
@@ -636,6 +637,7 @@ static void load_config(struct start_opts *sto, struct machine *oric)
       }
       continue;
     }
+    if(read_config_int(&sto->lctmp[i], "gdb_port", &oric->gdb_port, 0, 65535)) continue;
     if(read_config_option(&sto->lctmp[i], "joyinterface", &oric->joy_iface, joyifacetypes)) continue;
     if(read_config_option(&sto->lctmp[i], "joystick_a", &oric->joymode_a,     joymodes)) continue;
     if(read_config_option(&sto->lctmp[i], "joystick_b", &oric->joymode_b,     joymodes)) continue;
@@ -996,6 +998,12 @@ SDL_bool init(struct machine *oric, int argc, char* argv[])
               oric->aciabackendcfg = oric->aciabackend = ACIA_TYPE_COM;
 #endif
             }
+            continue;
+          }
+
+          if(strcasecmp(tmp, "gdb_port") == 0)
+          {
+            if(opt_arg) oric->gdb_port = atoi(opt_arg);
             continue;
           }
 
@@ -1606,6 +1614,7 @@ void shut(struct machine *oric)
 #endif
   if(oric)
   {
+    gdb_stub_shutdown();
     shut_machine(oric);
     shut_joy(oric);
     shut_ula(oric);
@@ -1638,6 +1647,7 @@ void frameloop_overclock(struct machine *oric, SDL_bool *framedone, SDL_bool *ne
           setemumode(oric, NULL, EM_DEBUG);
           *needrender = SDL_TRUE;
 #endif
+          gdb_stub_notify_stop(oric, GDB_SIGNAL_TRAP);
           break;
         }
 
@@ -1687,6 +1697,7 @@ void frameloop_overclock(struct machine *oric, SDL_bool *framedone, SDL_bool *ne
         setemumode(oric, NULL, EM_DEBUG);
         *needrender = SDL_TRUE;
 #endif
+        gdb_stub_notify_stop(oric, GDB_SIGNAL_TRAP);
         break;
       }
     }
@@ -1712,6 +1723,7 @@ void frameloop_normal(struct machine *oric, SDL_bool *framedone, SDL_bool *needr
         setemumode(oric, NULL, EM_DEBUG);
         *needrender = SDL_TRUE;
 #endif
+        gdb_stub_notify_stop(oric, GDB_SIGNAL_TRAP);
         break;
       }
 
@@ -1746,6 +1758,7 @@ void frameloop_normal(struct machine *oric, SDL_bool *framedone, SDL_bool *needr
         setemumode(oric, NULL, EM_DEBUG);
         *needrender = SDL_TRUE;
 #endif
+        gdb_stub_notify_stop(oric, GDB_SIGNAL_TRAP);
         break;
       }
     }
@@ -1795,6 +1808,9 @@ static void loop_handler(void* arg)
 
     if(oric->emu_mode == EM_RUNNING)
     {
+      if(gdb_stub_poll(oric))
+        ctx->needrender = SDL_TRUE;
+
       if(oric->overclockmult == 1)
         frameloop_normal(oric, &ctx->framedone, &ctx->needrender);
       else
@@ -1871,6 +1887,8 @@ static void loop_handler(void* arg)
     else
     {
       ay_unlockaudio(&oric->ay);
+      if(gdb_stub_poll(oric))
+        ctx->needrender = SDL_TRUE;
       if(ctx->needrender)
       {
         render(oric);
@@ -1880,8 +1898,26 @@ static void loop_handler(void* arg)
       if(!SDL_PollEvent(event))
         break;
 #else
-      if(!SDL_WaitEvent(event))
-        break;
+      if(gdb_stub_is_listening())
+      {
+        /* Use timeout so we can poll for GDB commands while paused,
+           and also accept new client connections promptly */
+#if SDL_MAJOR_VERSION == 1
+        if(!SDL_PollEvent(event))
+        {
+          SDL_Delay(50);
+          continue;
+        }
+#else
+        if(!SDL_WaitEventTimeout(event, 50))
+          continue;
+#endif
+      }
+      else
+      {
+        if(!SDL_WaitEvent(event))
+          break;
+      }
 #endif
     }
 
@@ -2182,6 +2218,9 @@ int main(int argc, char* argv[])
   ctx.nextframe_us = ((Uint64)ctx.nextframe_ms) * 1000;
   ctx.needrender = SDL_TRUE;
   ctx.framedone = SDL_FALSE;
+
+  if(ctx.oric.gdb_port > 0)
+    gdb_stub_init(&ctx.oric, ctx.oric.gdb_port);
 
   if(load_keymap)
   {

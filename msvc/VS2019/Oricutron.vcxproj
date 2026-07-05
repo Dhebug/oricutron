@@ -120,7 +120,7 @@ if "$(Configuration.Contains('Release'))"=="True" ( copy "..\vcpkg\installed\x64
       <WarningLevel>Level4</WarningLevel>
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>.;..\vcpkg\installed\x64-windows\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.;..\vcpkg\installed\x64-windows\include\SDL</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>SDL_LIB=1;SDL_MAIN_HANDLED=1;__OPENGL_AVAILABLE__;_MBCS;WIN32;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;__CBCOPY__;__CBPASTE__;APP_NAME_FULL="Oricutron 1.2";APP_YEAR="2015";VERSION_COPYRIGHTS="Oricutron 1.2.0 (c)2015 Peter Gordon (pete@gordon.plus)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalOptions>/we4013 /we4115 /wd4100 /wd4244 /wd4152 /wd4706 /wd4018 /wd4267 /wd4389 /wd4245 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -170,7 +170,7 @@ if "$(Configuration.Contains('Release'))"=="True" ( copy "..\vcpkg\installed\x64
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>.;..\vcpkg\installed\x64-windows\include\</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.;..\vcpkg\installed\x64-windows\include\SDL</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>SDL_LIB=1;SDL_MAIN_HANDLED=1;__OPENGL_AVAILABLE__;_MBCS;WIN32;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;__CBCOPY__;__CBPASTE__;APP_NAME_FULL="Oricutron 1.2";APP_YEAR="2015";VERSION_COPYRIGHTS="Oricutron 1.2.0 (c)2015 Peter Gordon (pete@gordon.plus)";%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
@@ -197,6 +197,7 @@ if "$(Configuration.Contains('Release'))"=="True" ( copy "..\vcpkg\installed\x64
     <ClCompile Include="..\..\6551_com.c" />
     <ClCompile Include="..\..\6551_loopback.c" />
     <ClCompile Include="..\..\6551_modem.c" />
+    <ClCompile Include="..\..\gdb_stub.c" />
     <ClCompile Include="..\..\8912.c" />
     <ClCompile Include="..\..\avi.c" />
     <ClCompile Include="..\..\disk.c" />

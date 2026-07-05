@@ -545,6 +545,7 @@ OBJECTS = \
 	6551_loopback.o \
 	6551_modem.o \
 	6551_com.o \
+	gdb_stub.o \
 	disk.o \
 	disk_pravetz.o \
 	avi.o \

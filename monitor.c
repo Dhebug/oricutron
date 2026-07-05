@@ -99,6 +99,11 @@ static int memory_search_pos=0;
 
 static struct symboltable defaultsyms;
 
+/* Capture buffer for GDB qRcmd - when non-NULL, mon_str/mon_printf append here */
+static char *mon_capture_buf = NULL;
+static int   mon_capture_len = 0;
+static int   mon_capture_size = 0;
+
 #endif
 
 char mon_bpmsg[80];
@@ -2055,6 +2060,44 @@ void mon_oprintf(char* fmt, ...)
   va_end(ap);
 }
 
+static void mon_capture_append(const char *str)
+{
+  int slen;
+  if(!mon_capture_buf) return;
+  slen = (int)strlen(str);
+  if(mon_capture_len > 0 && mon_capture_len < mon_capture_size - 1)
+    mon_capture_buf[mon_capture_len++] = '\n';
+  if(mon_capture_len + slen >= mon_capture_size)
+    slen = mon_capture_size - mon_capture_len - 1;
+  if(slen > 0)
+  {
+    memcpy(mon_capture_buf + mon_capture_len, str, slen);
+    mon_capture_len += slen;
+    mon_capture_buf[mon_capture_len] = 0;
+  }
+}
+
+void mon_capture_start(int maxsize)
+{
+  if(mon_capture_buf) free(mon_capture_buf);
+  mon_capture_buf = (char *)malloc(maxsize);
+  if(mon_capture_buf)
+  {
+    mon_capture_buf[0] = 0;
+    mon_capture_len = 0;
+    mon_capture_size = maxsize;
+  }
+}
+
+char *mon_capture_end(void)
+{
+  char *result = mon_capture_buf;
+  mon_capture_buf = NULL;
+  mon_capture_len = 0;
+  mon_capture_size = 0;
+  return result;
+}
+
 void mon_printf(char* fmt, ...)
 {
   va_list ap;
@@ -2067,6 +2110,7 @@ void mon_printf(char* fmt, ...)
   if(vsnprintf(vsptmp, VSPTMPSIZE, fmt, ap) != -1)
   {
     vsptmp[VSPTMPSIZE-1] = 0;
+    mon_capture_append(vsptmp);
     i = 0;
     while(strlen(&vsptmp[i]) > 46)
     {
@@ -2109,6 +2153,7 @@ void mon_printf_above(char* fmt, ...)
 
 void mon_str(char* str)
 {
+  mon_capture_append(str);
   mon_scroll(SDL_FALSE);
   tzstrpos(tz[TZ_MONITOR], 1, 19, str);
 }
@@ -2166,6 +2211,12 @@ void mon_enter(struct machine *oric)
 
   modified = SDL_FALSE;
   updatepreview = SDL_TRUE;
+
+#if SDL_MAJOR_VERSION > 1
+  // Enable SDL text input so SDL_TEXTINPUT events are generated
+  // This respects the OS keyboard layout instead of hardcoded US mapping
+  SDL_StartTextInput();
+#endif
 }
 
 void mon_warminit(struct machine *oric)
@@ -2414,7 +2465,7 @@ SDL_bool mon_getnum(struct machine *oric, unsigned int* num, char* buf, int* off
 
     for(j=0; issymchar(buf[i+j]); j++) ;
     c = buf[i+j];
-    if(isws(c) || (c == 13) || (c == 10) || (c == 0) || (c == ',') || (c == ')'))
+    if(isws(c) || (c == 13) || (c == 10) || (c == 0) || (c == ',') || (c == ')') || (c == '+') || (c == '-') || (c == '*') || (c == '/') || (c == '&') || (c == '|') || (c == '^'))
     {
       buf[i+j] = 0;
       fsym = mon_find_sym_by_name(oric, &buf[i]);
@@ -2741,6 +2792,159 @@ SDL_bool mon_new_symbols(struct symboltable *stab, struct machine *oric, char* f
   return SDL_TRUE;
 }
 
+/* ---- Expression evaluator (recursive descent) ----
+ *
+ * Precedence (low → high):
+ *   |           bitwise OR
+ *   ^           bitwise XOR
+ *   &           bitwise AND
+ *   + -         add / subtract
+ *   * /         multiply / divide  (* in prefix position = dereference)
+ *   unary       * (deref)  - (negate)  < (low byte)  > (high byte)
+ *   atom        number  symbol  register  ( expr )
+ */
+
+static SDL_bool eval_expr(struct machine *oric, unsigned int *result, char *buf, int *off);
+
+static SDL_bool eval_atom(struct machine *oric, unsigned int *result, char *buf, int *off)
+{
+  int i = *off;
+  while(isws(buf[i])) i++;
+
+  if(buf[i] == '(')
+  {
+    i++;
+    *off = i;
+    if(!eval_expr(oric, result, buf, off)) return SDL_FALSE;
+    i = *off;
+    while(isws(buf[i])) i++;
+    if(buf[i] == ')') i++;
+    *off = i;
+    return SDL_TRUE;
+  }
+
+  *off = i;
+  return mon_getnum(oric, result, buf, off, SDL_TRUE, SDL_TRUE, SDL_FALSE, SDL_TRUE);
+}
+
+static SDL_bool eval_unary(struct machine *oric, unsigned int *result, char *buf, int *off)
+{
+  int i = *off;
+  while(isws(buf[i])) i++;
+
+  if(buf[i] == '*')
+  {
+    unsigned int lo, hi;
+    i++; *off = i;
+    if(!eval_unary(oric, result, buf, off)) return SDL_FALSE;
+    lo = mon_read(oric, (unsigned short)(*result));
+    hi = mon_read(oric, (unsigned short)((*result + 1) & 0xFFFF));
+    *result = lo | (hi << 8);
+    return SDL_TRUE;
+  }
+  if(buf[i] == '-')
+  {
+    i++; *off = i;
+    if(!eval_unary(oric, result, buf, off)) return SDL_FALSE;
+    *result = (unsigned int)(-(int)*result);
+    return SDL_TRUE;
+  }
+  if(buf[i] == '<')
+  {
+    i++; *off = i;
+    if(!eval_unary(oric, result, buf, off)) return SDL_FALSE;
+    *result = *result & 0xFF;
+    return SDL_TRUE;
+  }
+  if(buf[i] == '>')
+  {
+    i++; *off = i;
+    if(!eval_unary(oric, result, buf, off)) return SDL_FALSE;
+    *result = (*result >> 8) & 0xFF;
+    return SDL_TRUE;
+  }
+
+  *off = i;
+  return eval_atom(oric, result, buf, off);
+}
+
+static SDL_bool eval_mul(struct machine *oric, unsigned int *result, char *buf, int *off)
+{
+  unsigned int right;
+  int i;
+  if(!eval_unary(oric, result, buf, off)) return SDL_FALSE;
+  for(;;)
+  {
+    i = *off; while(isws(buf[i])) i++;
+    if(buf[i] == '*') { i++; *off = i; if(!eval_unary(oric, &right, buf, off)) return SDL_FALSE; *result *= right; }
+    else if(buf[i] == '/') { i++; *off = i; if(!eval_unary(oric, &right, buf, off)) return SDL_FALSE; if(!right) return SDL_FALSE; *result /= right; }
+    else break;
+  }
+  return SDL_TRUE;
+}
+
+static SDL_bool eval_add(struct machine *oric, unsigned int *result, char *buf, int *off)
+{
+  unsigned int right;
+  int i;
+  if(!eval_mul(oric, result, buf, off)) return SDL_FALSE;
+  for(;;)
+  {
+    i = *off; while(isws(buf[i])) i++;
+    if(buf[i] == '+') { i++; *off = i; if(!eval_mul(oric, &right, buf, off)) return SDL_FALSE; *result += right; }
+    else if(buf[i] == '-') { i++; *off = i; if(!eval_mul(oric, &right, buf, off)) return SDL_FALSE; *result -= right; }
+    else break;
+  }
+  return SDL_TRUE;
+}
+
+static SDL_bool eval_and(struct machine *oric, unsigned int *result, char *buf, int *off)
+{
+  unsigned int right;
+  int i;
+  if(!eval_add(oric, result, buf, off)) return SDL_FALSE;
+  for(;;)
+  {
+    i = *off; while(isws(buf[i])) i++;
+    if(buf[i] == '&') { i++; *off = i; if(!eval_add(oric, &right, buf, off)) return SDL_FALSE; *result &= right; }
+    else break;
+  }
+  return SDL_TRUE;
+}
+
+static SDL_bool eval_xor(struct machine *oric, unsigned int *result, char *buf, int *off)
+{
+  unsigned int right;
+  int i;
+  if(!eval_and(oric, result, buf, off)) return SDL_FALSE;
+  for(;;)
+  {
+    i = *off; while(isws(buf[i])) i++;
+    if(buf[i] == '^') { i++; *off = i; if(!eval_and(oric, &right, buf, off)) return SDL_FALSE; *result ^= right; }
+    else break;
+  }
+  return SDL_TRUE;
+}
+
+static SDL_bool eval_expr(struct machine *oric, unsigned int *result, char *buf, int *off)
+{
+  unsigned int right;
+  int i;
+  if(!eval_xor(oric, result, buf, off)) return SDL_FALSE;
+  for(;;)
+  {
+    i = *off; while(isws(buf[i])) i++;
+    if(buf[i] == '|') { i++; *off = i; if(!eval_xor(oric, &right, buf, off)) return SDL_FALSE; *result |= right; }
+    else break;
+  }
+  return SDL_TRUE;
+}
+
+SDL_bool mon_eval(struct machine *oric, unsigned int *result, char *buf, int *off)
+{
+  return eval_expr(oric, result, buf, off);
+}
+
 SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
 {
   int i, j, k, l;
@@ -2762,8 +2966,18 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
       lastcmd = ARPT_ASSEM;
       i++;
 
-      if(mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
-        mon_addr = v;
+      {
+        int save_i = i;
+        if(mon_eval(oric, &v, cmd, &i))
+        {
+          mon_addr = v;
+        }
+        else
+        {
+          j = save_i; while(isws(cmd[j])) j++;
+          if(cmd[j] != 0) { mon_str("Invalid expression"); break; }
+        }
+      }
 
       mon_asmmode = SDL_TRUE;
       break;
@@ -2808,7 +3022,7 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
             break;
           }
 
-          if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
+          if(!mon_eval(oric, &v, cmd, &i))
           {
             mon_str("Address expected");
             break;
@@ -2964,7 +3178,7 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
             }
 
             i += 2;
-            if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_TRUE, SDL_TRUE, SDL_TRUE))
+            if(!mon_eval(oric, &v, cmd, &i))
             {
               mon_str("Address expected");
               break;
@@ -3022,7 +3236,7 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
           }
 
           i++;
-          if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_TRUE, SDL_TRUE, SDL_TRUE))
+          if(!mon_eval(oric, &v, cmd, &i))
           {
             mon_str("Address expected");
             break;
@@ -3140,7 +3354,7 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
           lastcmd = 0;
           i++;
 
-          if(!mon_getnum(oric, &w, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
+          if(!mon_eval(oric, &w, cmd, &i))
           {
             mon_str("Value expected");
           }
@@ -3166,7 +3380,7 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
           lastcmd = 0;
           i++;
 
-          if(!mon_getnum(oric, &w, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
+          if(!mon_eval(oric, &w, cmd, &i))
           {
             mon_str("Value expected");
           }
@@ -3231,13 +3445,13 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
           lastcmd = 0;
           i++;
 
-          if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
+          if(!mon_eval(oric, &v, cmd, &i))
           {
             mon_str("Bad address");
             break;
           }
 
-          if(!mon_getnum(oric, &w, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
+          if(!mon_eval(oric, &w, cmd, &i))
           {
             mon_str("Value expected");
             break;
@@ -3252,7 +3466,7 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
           lastcmd = 0;
           i++;
 
-          if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
+          if(!mon_eval(oric, &v, cmd, &i))
           {
             mon_str("Bad address");
             break;
@@ -3278,8 +3492,18 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
           }
 
 
-          if(mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
-            mon_addr = v;
+          {
+            int save_i = i;
+            if(mon_eval(oric, &v, cmd, &i))
+            {
+              mon_addr = v;
+            }
+            else
+            {
+              j = save_i; while(isws(cmd[j])) j++;
+              if(cmd[j] != 0) { mon_str("Invalid expression"); break; }
+            }
+          }
 
           for(j=0; j<16; j++)
           {
@@ -3309,8 +3533,18 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
     case 'd':
       lastcmd = ARPT_DISASM;
       i++;
-      if(mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
-        mon_addr = v;
+      {
+        int save_i = i;
+        if(mon_eval(oric, &v, cmd, &i))
+        {
+          mon_addr = v;
+        }
+        else
+        {
+          j = save_i; while(isws(cmd[j])) j++;
+          if(cmd[j] != 0) { mon_str("Invalid expression"); break; }
+        }
+      }
 
       for(j=0; j<16; j++)
         mon_str(mon_disassemble(oric, &mon_addr, NULL, SDL_FALSE));
@@ -3327,7 +3561,7 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
         break;
       }
 
-      if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_TRUE, SDL_TRUE, SDL_TRUE))
+      if(!mon_eval(oric, &v, cmd, &i))
       {
         mon_str("Expression expected");
         break;
@@ -3479,14 +3713,14 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
         // fd - disassemble to file
         case 'd':
           i++;
-          if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
+          if(!mon_eval(oric, &v, cmd, &i))
           {
             mon_str("Start address expected\n");
             break;
           }
 
           mon_addr = v;
-          if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_FALSE, SDL_FALSE, SDL_TRUE))
+          if(!mon_eval(oric, &v, cmd, &i))
           {
             mon_str("End address expected\n");
             break;
@@ -3519,13 +3753,13 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
         // fw - write mem to bin file
         case 'w':
           i++;
-          if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_TRUE, SDL_TRUE, SDL_TRUE))
+          if(!mon_eval(oric, &v, cmd, &i))
           {
             mon_str("Address expected");
             break;
           }
 
-          if(!mon_getnum(oric, &w, cmd, &i, SDL_TRUE, SDL_TRUE, SDL_TRUE, SDL_TRUE))
+          if(!mon_eval(oric, &w, cmd, &i))
           {
             mon_str("Size expected");
             break;
@@ -3569,7 +3803,7 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
         // fr - read file to mem
         case 'r':
           i++;
-          if(!mon_getnum(oric, &v, cmd, &i, SDL_TRUE, SDL_TRUE, SDL_TRUE, SDL_TRUE))
+          if(!mon_eval(oric, &v, cmd, &i))
           {
             mon_str("Address expected");
             break;
@@ -3702,16 +3936,16 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
           mon_str("  fw <addr> <len> <file>- Write mem to bin file");
           // ToDo:  mon_str( "  ft <addr> <len> <file>- Write mem to tap file" );
           mon_str("  fr <addr> <file>      - Read bin file to mem");
+          mon_str("  = <expr>              - Evaluate expression");
           mon_str(" ");
-          mon_str(" ");
-          mon_str(" ");
-          mon_str(" ");
-          mon_str(" ");
-          mon_str(" ");
-          mon_str(" ");
-          mon_str(" ");
-          mon_str(" ");
-          mon_str(" ");
+          mon_str("EXPRESSIONS: (a,d,m,bs,= commands)");
+          mon_str("  Ops: + - * / & | ^  Unary: * < > -");
+          mon_str("  *ptr  deref 16-bit   <val  low byte");
+          mon_str("  >val  high byte      ()    grouping");
+          mon_str("  Values: $hex %bin dec label A X Y PC SP");
+          mon_str("  Ex: = *ptr_dest + X * 2");
+          mon_str("      m _LoadData + $10");
+          mon_str("      d *($00F5)");
           mon_str(" ");
           mon_str(" ");
           mon_str(" ");
@@ -3720,6 +3954,24 @@ SDL_bool mon_cmd(char* cmd, struct machine *oric, SDL_bool *needrender)
           helpcount = 0;
           lastcmd = 0;
           break;
+      }
+      break;
+
+    case '=':
+      lastcmd = 0;
+      i++;
+      if(mon_eval(oric, &v, cmd, &i))
+      {
+        if(v <= 0xFF)
+          mon_printf("$%02X (%u)", v, v);
+        else if(v <= 0xFFFF)
+          mon_printf("$%04X (%u)", v, v);
+        else
+          mon_printf("$%X (%u)", v, v);
+      }
+      else
+      {
+        mon_str("Invalid expression");
       }
       break;
 
@@ -4162,25 +4414,25 @@ static SDL_bool mon_console_keydown(SDL_Event *ev, struct machine *oric, SDL_boo
         break;
     }
 
-    switch(SDL_COMPAT_GetKeysymUnicode(ev->key.keysym))
+#if SDL_MAJOR_VERSION == 1
+    // SDL 1.x: no SDL_TEXTINPUT, use TranslateUnicode directly
+    if((SDL_COMPAT_GetKeysymUnicode(ev->key.keysym) > 31) && (SDL_COMPAT_GetKeysymUnicode(ev->key.keysym) < 127))
     {
-      default:
-        if((SDL_COMPAT_GetKeysymUnicode(ev->key.keysym) > 31) && (SDL_COMPAT_GetKeysymUnicode(ev->key.keysym) < 127))
-        {
-          if(ilen >= MAX_ASM_INPUT) break;
-
-          mon_hide_curs();
-          for(i=ilen+1; i>cursx; i--)
-            ibuf[i] = ibuf[i-1];
-          ibuf[cursx] = SDL_COMPAT_TranslateUnicode(ev->key.keysym);
-          cursx++;
-          ilen++;
-          mon_write_ibuf_asm();
-          mon_show_curs();
-          *needrender = SDL_TRUE;
-        }
-        break;
+      if(ilen < MAX_ASM_INPUT)
+      {
+        mon_hide_curs();
+        for(i=ilen+1; i>cursx; i--)
+          ibuf[i] = ibuf[i-1];
+        ibuf[cursx] = SDL_COMPAT_TranslateUnicode(ev->key.keysym);
+        cursx++;
+        ilen++;
+        mon_write_ibuf_asm();
+        mon_show_curs();
+        *needrender = SDL_TRUE;
+      }
     }
+#endif
+    // SDL 2.x: character insertion handled by SDL_TEXTINPUT in mon_event
     return done;
   }
 
@@ -4317,17 +4569,19 @@ static SDL_bool mon_console_keydown(SDL_Event *ev, struct machine *oric, SDL_boo
       break;
   }
 
-  switch(SDL_COMPAT_GetKeysymUnicode(ev->key.keysym))
+#if SDL_MAJOR_VERSION == 1
+  // SDL 1.x: no SDL_TEXTINPUT, use TranslateUnicode directly
   {
-    default:
-      if((SDL_COMPAT_GetKeysymUnicode(ev->key.keysym) > 31) && (SDL_COMPAT_GetKeysymUnicode(ev->key.keysym) < 127))
+    SDL_COMPAT_KEY u = SDL_COMPAT_GetKeysymUnicode(ev->key.keysym);
+    if(u > 31 && u < 127)
+    {
+      char ch = (char)SDL_COMPAT_TranslateUnicode(ev->key.keysym);
+      if(ch && ilen < MAX_CONS_INPUT)
       {
-        if(ilen >= MAX_CONS_INPUT) break;
-
         mon_hide_curs();
         for(i=ilen+1; i>cursx; i--)
           ibuf[i] = ibuf[i-1];
-        ibuf[cursx] = SDL_COMPAT_TranslateUnicode(ev->key.keysym);
+        ibuf[cursx] = ch;
         cursx++;
         ilen++;
         mon_set_iloff();
@@ -4335,8 +4589,10 @@ static SDL_bool mon_console_keydown(SDL_Event *ev, struct machine *oric, SDL_boo
         mon_show_curs();
         *needrender = SDL_TRUE;
       }
-      break;
+    }
   }
+#endif
+  // SDL 2.x: character insertion handled by SDL_TEXTINPUT in mon_event
   return done;
 }
 
@@ -4413,6 +4669,8 @@ static SDL_bool mon_mwatch_keydown(SDL_Event *ev, struct machine *oric, SDL_bool
       break;
   }
 
+#if SDL_MAJOR_VERSION == 1
+  // SDL 1.x: no SDL_TEXTINPUT, use TranslateUnicode directly
   if(ishex(SDL_COMPAT_GetKeysymUnicode(ev->key.keysym)))
   {
     if(mw_mode != 1)
@@ -4422,15 +4680,15 @@ static SDL_bool mon_mwatch_keydown(SDL_Event *ev, struct machine *oric, SDL_bool
       mw_ibuf[1] = 0;
       mw_koffs = 0;
     }
-
     if(mw_koffs < 4)
     {
       mw_ibuf[++mw_koffs] = SDL_COMPAT_TranslateUnicode(ev->key.keysym);
       mw_ibuf[mw_koffs+1] = 0;
     }
-
     *needrender = SDL_TRUE;
   }
+#endif
+  // SDL 2.x: hex character insertion handled by SDL_TEXTINPUT in mon_event
 
   return done;
 }
@@ -4686,6 +4944,76 @@ SDL_bool mon_event(SDL_Event *ev, struct machine *oric, SDL_bool *needrender)
         }
       }
       break;
+
+#if SDL_MAJOR_VERSION > 1
+    case SDL_TEXTINPUT:
+    {
+      // Use SDL_TEXTINPUT for character insertion — respects OS keyboard layout
+      char ch = ev->text.text[0];
+      if(ch > 31 && ch < 127)
+      {
+        switch(cshow)
+        {
+          case CSHOW_CONSOLE:
+          {
+            int i;
+            if(mon_asmmode)
+            {
+              if(ilen < MAX_ASM_INPUT)
+              {
+                mon_hide_curs();
+                for(i=ilen+1; i>cursx; i--)
+                  ibuf[i] = ibuf[i-1];
+                ibuf[cursx] = ch;
+                cursx++;
+                ilen++;
+                mon_write_ibuf_asm();
+                mon_show_curs();
+                *needrender = SDL_TRUE;
+              }
+            }
+            else
+            {
+              if(ilen < MAX_CONS_INPUT)
+              {
+                mon_hide_curs();
+                for(i=ilen+1; i>cursx; i--)
+                  ibuf[i] = ibuf[i-1];
+                ibuf[cursx] = ch;
+                cursx++;
+                ilen++;
+                mon_set_iloff();
+                mon_write_ibuf();
+                mon_show_curs();
+                *needrender = SDL_TRUE;
+              }
+            }
+            break;
+          }
+
+          case CSHOW_MWATCH:
+            if(ishex(ch))
+            {
+              if(mw_mode != 1)
+              {
+                mw_mode = 1;
+                mw_ibuf[0] = '$';
+                mw_ibuf[1] = 0;
+                mw_koffs = 0;
+              }
+              if(mw_koffs < 4)
+              {
+                mw_ibuf[++mw_koffs] = ch;
+                mw_ibuf[mw_koffs+1] = 0;
+              }
+              *needrender = SDL_TRUE;
+            }
+            break;
+        }
+      }
+      break;
+    }
+#endif /* SDL_MAJOR_VERSION > 1 */
   }
 
   return done;

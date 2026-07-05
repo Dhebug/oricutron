@@ -3,6 +3,11 @@ Oricutron ChangeLog
 
 pre-release changes (work in progress)
 --------------------------------------
+* Added GDB Remote Serial Protocol server for external debugger integration (--gdb_port)
+* Added expression evaluator in monitor with full operator precedence and pointer dereference
+* Added monitor output capture for GDB command bridge (qOricCmd)
+* Added custom GDB queries: qOricCpuExtra, qOricPeripherals, qOricEval
+* Added SDL2 text input support in monitor for proper keyboard layout handling
 * New breakpoint flag 't' to print current counter
 * Added monitor memory search (#180) (@cedricp)
 * Added Sound loopback (useful to simulate speech software)
