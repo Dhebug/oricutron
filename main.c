@@ -68,6 +68,7 @@
 #include "snapshot.h"
 #include "keyboard.h"
 #include "gdb_stub.h"
+#include "viz_stream.h"
 
 #ifdef _MSC_VER
 #if SDL_MAJOR_VERSION == 1
@@ -1614,6 +1615,7 @@ void shut(struct machine *oric)
 #endif
   if(oric)
   {
+    viz_shutdown();
     gdb_stub_shutdown();
     shut_machine(oric);
     shut_joy(oric);
@@ -1776,6 +1778,8 @@ void once_per_frame(struct machine *oric)
 {
   int i;
 
+  viz_frame_decay();
+
   if(oric->diskautosave)
   {
     for(i=0; i<4; i++)
@@ -1810,6 +1814,7 @@ static void loop_handler(void* arg)
     {
       if(gdb_stub_poll(oric))
         ctx->needrender = SDL_TRUE;
+      viz_poll(oric, SDL_TRUE);
 
       if(oric->overclockmult == 1)
         frameloop_normal(oric, &ctx->framedone, &ctx->needrender);
@@ -1889,6 +1894,7 @@ static void loop_handler(void* arg)
       ay_unlockaudio(&oric->ay);
       if(gdb_stub_poll(oric))
         ctx->needrender = SDL_TRUE;
+      viz_poll(oric, SDL_FALSE);
       if(ctx->needrender)
       {
         render(oric);
@@ -2220,7 +2226,10 @@ int main(int argc, char* argv[])
   ctx.framedone = SDL_FALSE;
 
   if(ctx.oric.gdb_port > 0)
+  {
     gdb_stub_init(&ctx.oric, ctx.oric.gdb_port);
+    viz_init(&ctx.oric);
+  }
 
   if(load_keymap)
   {

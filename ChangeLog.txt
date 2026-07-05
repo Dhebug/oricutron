@@ -3,6 +3,11 @@ Oricutron ChangeLog
 
 pre-release changes (work in progress)
 --------------------------------------
+* Added memory access heatmap visualization stream (TCP on gdb_port+1)
+  - Tracks CPU reads, writes, and ULA video fetches across the full 64KB address space
+  - Pushes binary frames at ~16fps to a connected client (e.g. VS Code webview)
+  - Heat values decay over emulated frames; debugger/monitor reads are excluded
+  - Automatically enabled when --gdb_port is set; no extra options needed
 * Added GDB Remote Serial Protocol server for external debugger integration (--gdb_port)
 * Added expression evaluator in monitor with full operator precedence and pointer dereference
 * Added monitor output capture for GDB command bridge (qOricCmd)

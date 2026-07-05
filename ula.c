@@ -33,6 +33,7 @@
 #include "machine.h"
 #include "ula.h"
 #include "avi.h"
+#include "viz_stream.h"
 
 extern struct avi_handle *vidcap;
 extern SDL_bool warpspeed;
@@ -407,6 +408,7 @@ SDL_bool ula_doraster(struct machine *oric)
   for(b=0; b<40; b++)
   {
     c = *(++rptr);
+    if(viz_tracking) viz_mark_ula((Uint16)(rptr - oric->mem));
 
     /* if bits 6 and 5 are zero, the byte contains a serial attribute */
     if((c & 0x60) == 0)
@@ -448,6 +450,7 @@ SDL_bool ula_doraster(struct machine *oric)
 
         ch_ix   = c & 0x7f;
         ch_dat = oric->vid_ch_data[(ch_ix<<3) | oric->vid_chline ] & bitmask;
+        if(viz_tracking) viz_mark_ula((Uint16)(oric->vid_ch_data + ((ch_ix<<3) | oric->vid_chline) - oric->mem));
 
         oric->vid_block_func(oric, (c & 0x80)!=0, ch_dat, y);
       }

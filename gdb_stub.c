@@ -59,6 +59,7 @@ typedef int SOCKET;
 #include "ula.h"
 #include "tape.h"
 #include "gdb_stub.h"
+#include "viz_stream.h"
 
 extern char mon_bpmsg[];
 
@@ -464,12 +465,14 @@ static void gdb_read_memory(struct machine *oric, const char *data)
     len = (GDB_PKT_SIZE - 5) / 2;
 
   p = gdb.pktbuf;
+  viz_suppress = SDL_TRUE;
   for(i = 0; i < len; i++)
   {
     unsigned char byte = oric->cpu.read(&oric->cpu, (Uint16)((addr + i) & 0xffff));
     hex_byte(p, byte);
     p += 2;
   }
+  viz_suppress = SDL_FALSE;
   *p = '\0';
 
   gdb_send_packet(gdb.pktbuf);
@@ -604,7 +607,9 @@ static void gdb_set_watchpoint(struct machine *oric, const char *data, Uint8 fla
     {
       oric->cpu.membreakpoints[i].addr = (Uint16)addr;
       oric->cpu.membreakpoints[i].flags = flags;
+      viz_suppress = SDL_TRUE;
       oric->cpu.membreakpoints[i].lastval = oric->cpu.read(&oric->cpu, (Uint16)addr);
+      viz_suppress = SDL_FALSE;
       oric->cpu.anymbp = SDL_TRUE;
       gdb_send_ok();
       return;
@@ -774,9 +779,11 @@ static void gdb_handle_query(struct machine *oric, const char *data)
     hex_byte(p, (oric->vid_raster >> 8) & 0xff); p += 2;
     *p++ = ';';
 
+    viz_suppress = SDL_TRUE;
     nmi = (oric->cpu.read(&oric->cpu, 0xfffb) << 8) | oric->cpu.read(&oric->cpu, 0xfffa);
     rst = (oric->cpu.read(&oric->cpu, 0xfffd) << 8) | oric->cpu.read(&oric->cpu, 0xfffc);
     irq = (oric->cpu.read(&oric->cpu, 0xffff) << 8) | oric->cpu.read(&oric->cpu, 0xfffe);
+    viz_suppress = SDL_FALSE;
 
     *p++ = 'N'; *p++ = ':';
     hex_byte(p, nmi & 0xff);       p += 2;

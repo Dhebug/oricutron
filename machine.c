@@ -56,6 +56,7 @@
 #include "joystick.h"
 #include "tape.h"
 #include "keyboard.h"
+#include "viz_stream.h"
 
 extern SDL_bool warpspeed, soundavailable, soundon;
 extern char diskpath[], diskfile[], filetmp[];
@@ -319,7 +320,7 @@ void setromon(struct machine *oric)
 void atmoswrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
-
+  if(viz_tracking) viz_mark_write(addr);
 
   if(oric->twilighteboard_activated &&  addr >= 0xc000)
     twilighteboard_oric_ROM_RAM_write(oric->twilighte,addr-0xc000,data);
@@ -355,6 +356,7 @@ void atmoswrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 void o16kwrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_write(addr);
   if((!oric->romdis) && (addr >= 0xc000)) return;        // Can't write to ROM!
   if((addr & 0xff00) == 0x0300)
   {
@@ -377,6 +379,7 @@ void o16kwrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 void telestratwrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_write(addr);
 
   if(addr >= 0xc000)
   {
@@ -433,6 +436,7 @@ void telestratwrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 void jasmin_atmoswrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_write(addr);
 
   if(oric->jasmin.olay == 0)
   {
@@ -469,6 +473,7 @@ void jasmin_atmoswrite(struct m6502 *cpu, unsigned short addr, unsigned char dat
 void jasmin_o16kwrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_write(addr);
 
   if(oric->jasmin.olay == 0)
   {
@@ -506,6 +511,7 @@ void jasmin_o16kwrite(struct m6502 *cpu, unsigned short addr, unsigned char data
 void microdisc_atmoswrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_write(addr);
   if(oric->romdis)
   {
     if((oric->md.diskrom) && (addr >= 0xe000)) return;       // Can't write to ROM!
@@ -538,6 +544,7 @@ void microdisc_atmoswrite(struct m6502 *cpu, unsigned short addr, unsigned char 
 void bd500_atmoswrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_write(addr);
   if(oric->romdis)
   {
     if((oric->bd.diskrom) && (addr >= 0xc000)) return;       // Can't write to ROM!
@@ -570,6 +577,7 @@ void bd500_atmoswrite(struct m6502 *cpu, unsigned short addr, unsigned char data
 void microdisc_o16kwrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_write(addr);
   if(oric->romdis)
   {
     if((oric->md.diskrom) && (addr >= 0xe000)) return;       // Can't write to ROM!
@@ -602,6 +610,7 @@ void microdisc_o16kwrite(struct m6502 *cpu, unsigned short addr, unsigned char d
 void bd500_o16kwrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_write(addr);
   if(oric->romdis)
   {
     if((oric->bd.diskrom) && (addr >= 0xc000)) return;       // Can't write to ROM!
@@ -634,6 +643,7 @@ void bd500_o16kwrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 void pravetz_atmoswrite(struct m6502 *cpu, unsigned short addr, unsigned char data)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_write(addr);
 
   oric->mem[addr] = data;
 
@@ -728,6 +738,7 @@ SDL_bool isram(struct machine *oric, unsigned short addr)
 unsigned char atmosread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if((addr & 0xff00) == 0x0300)
   {
@@ -768,6 +779,7 @@ unsigned char atmosread(struct m6502 *cpu, unsigned short addr)
 unsigned char o16kread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if((addr & 0xff00) == 0x0300)
   {
@@ -790,6 +802,7 @@ unsigned char o16kread(struct m6502 *cpu, unsigned short addr)
 unsigned char telestratread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if((addr & 0xff00) == 0x0300)
   {
@@ -836,6 +849,7 @@ unsigned char telestratread(struct m6502 *cpu, unsigned short addr)
 unsigned char jasmin_atmosread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if(oric->jasmin.olay == 0)
   {
@@ -870,6 +884,7 @@ unsigned char jasmin_atmosread(struct m6502 *cpu, unsigned short addr)
 unsigned char jasmin_o16kread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if(oric->jasmin.olay == 0)
   {
@@ -904,6 +919,7 @@ unsigned char jasmin_o16kread(struct m6502 *cpu, unsigned short addr)
 unsigned char microdisc_atmosread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if(oric->romdis)
   {
@@ -937,6 +953,7 @@ unsigned char microdisc_atmosread(struct m6502 *cpu, unsigned short addr)
 unsigned char bd500_atmosread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if(oric->romdis)
   {
@@ -970,6 +987,7 @@ unsigned char bd500_atmosread(struct m6502 *cpu, unsigned short addr)
 unsigned char microdisc_o16kread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if(oric->romdis)
   {
@@ -1003,6 +1021,7 @@ unsigned char microdisc_o16kread(struct m6502 *cpu, unsigned short addr)
 unsigned char bd500_o16kread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if(oric->romdis)
   {
@@ -1036,6 +1055,7 @@ unsigned char bd500_o16kread(struct m6502 *cpu, unsigned short addr)
 unsigned char pravetz_atmosread(struct m6502 *cpu, unsigned short addr)
 {
   struct machine *oric = (struct machine *)cpu->userdata;
+  if(viz_tracking) viz_mark_read(addr);
 
   if(0x300 == (addr & 0xfff0))
   {

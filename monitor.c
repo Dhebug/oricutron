@@ -50,6 +50,7 @@
 #include "ula.h"
 #include "tape.h"
 #include "snapshot.h"
+#include "viz_stream.h"
 #include "plugins/twilighte_board/oric_twilighte_board_plugin.h"
 
 #define LOG_DEBUG 0
@@ -732,6 +733,8 @@ static int bp_at(struct machine *oric, unsigned short addr, int* xbp, int* mbp)
 // Don't mess with registers that change because you read them!
 unsigned char mon_read(struct machine *oric, unsigned short addr)
 {
+  unsigned char val;
+
   // microdisc registers could screw things up
   if(oric->drivetype == DRV_MICRODISC)
   {
@@ -767,7 +770,10 @@ unsigned char mon_read(struct machine *oric, unsigned short addr)
     {
       return 0xFF;
     }
-    return oric->cpu.read(&oric->cpu, addr);
+    viz_suppress = SDL_TRUE;
+    val = oric->cpu.read(&oric->cpu, addr);
+    viz_suppress = SDL_FALSE;
+    return val;
   }
 
   if((addr & 0xff00) == 0x0300)
@@ -778,7 +784,10 @@ unsigned char mon_read(struct machine *oric, unsigned short addr)
     }
   }
 
-  return oric->cpu.read(&oric->cpu, addr);
+  viz_suppress = SDL_TRUE;
+  val = oric->cpu.read(&oric->cpu, addr);
+  viz_suppress = SDL_FALSE;
+  return val;
 }
 
 void mon_store_state(struct machine *oric)
@@ -1367,10 +1376,12 @@ void mon_update_regs(struct machine *oric)
               oric->cpu.f_z,
               oric->cpu.f_c);
 
+  viz_suppress = SDL_TRUE;
   tzprintfpos(tz[TZ_REGS], 30, 4, "NMI=%04X RST=%04X",
               (oric->cpu.read(&oric->cpu, 0xfffb)<<8)|oric->cpu.read(&oric->cpu, 0xfffa),
               (oric->cpu.read(&oric->cpu, 0xfffd)<<8)|oric->cpu.read(&oric->cpu, 0xfffc));
   tzprintfpos(tz[TZ_REGS], 30, 5, "IRQ=%04X", (oric->cpu.read(&oric->cpu, 0xffff)<<8)|oric->cpu.read(&oric->cpu, 0xfffe));
+  viz_suppress = SDL_FALSE;
 
 
   addr = pc;
