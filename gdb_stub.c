@@ -92,6 +92,10 @@ static struct {
 
   /* PC value at last stop notification sent to client */
   Uint16 last_notified_pc;
+
+  /* Temp breakpoint for step-over / step-out */
+  Sint32 temp_bp_slot;            /* breakpoint slot used for temp BP, -1 = none */
+  Sint64 stepover_start_cycles;   /* cycle counter at start of step-over, -1 = none */
 } gdb = {
   GDB_INVALID_SOCKET,
   GDB_INVALID_SOCKET,
@@ -102,7 +106,9 @@ static struct {
   {0},
   SDL_FALSE,
   SDL_FALSE,
-  0
+  0,
+  -1,
+  -1
 };
 
 /* ------------------------------------------------------------------ */
@@ -282,12 +288,14 @@ static void gdb_send_error(int errnum)
 
 static void gdb_send_stop_reply(struct machine *oric, int signal)
 {
-  char buf[64];
+  char buf[256];
+  char *p;
   struct m6502 *cpu = &oric->cpu;
   unsigned char flags = (unsigned char)MAKEFLAGS;
 
   /* T05 with register info for faster response */
-  sprintf(buf, "T%02x00:%02x;01:%02x;02:%02x;03:%02x;04:%02x%02x;05:%02x;",
+  p = buf;
+  p += sprintf(p, "T%02x00:%02x;01:%02x;02:%02x;03:%02x;04:%02x%02x;05:%02x;",
     signal,
     cpu->a,
     cpu->x,
@@ -295,6 +303,28 @@ static void gdb_send_stop_reply(struct machine *oric, int signal)
     cpu->sp,
     (unsigned char)(cpu->pc & 0xff), (unsigned char)((cpu->pc >> 8) & 0xff),
     flags);
+
+  /* Append cycle delta if step-over just completed */
+  if(gdb.stepover_start_cycles >= 0)
+  {
+    Sint64 delta = (Sint64)cpu->cycles - gdb.stepover_start_cycles;
+    if(delta < 0) delta = 0;
+    p += sprintf(p, "OricCycles:%08x;", (unsigned int)(delta & 0xFFFFFFFF));
+    gdb.stepover_start_cycles = -1;
+  }
+
+  /* Append watchpoint info if mon_bpmsg indicates a watchpoint hit */
+  if(mon_bpmsg[0])
+  {
+    unsigned int wpaddr;
+    if(strstr(mon_bpmsg, "WRITE to $") && sscanf(strstr(mon_bpmsg, "$"), "$%x", &wpaddr) == 1)
+      p += sprintf(p, "watch:%04x;", wpaddr);
+    else if(strstr(mon_bpmsg, "READ from $") && sscanf(strstr(mon_bpmsg, "$"), "$%x", &wpaddr) == 1)
+      p += sprintf(p, "rwatch:%04x;", wpaddr);
+    else if(strstr(mon_bpmsg, "changed") && sscanf(strstr(mon_bpmsg, "$"), "$%x", &wpaddr) == 1)
+      p += sprintf(p, "awatch:%04x;", wpaddr);
+  }
+
   gdb_send_packet(buf);
   gdb.last_notified_pc = cpu->pc;
 }
@@ -539,6 +569,7 @@ static void gdb_set_breakpoint(struct machine *oric, const char *data)
     {
       oric->cpu.breakpoints[i] = (Sint32)addr;
       oric->cpu.anybp = SDL_TRUE;
+      gdb.need_render = SDL_TRUE;
       gdb_send_ok();
       return;
     }
@@ -582,6 +613,7 @@ static void gdb_clear_breakpoint(struct machine *oric, const char *data)
     }
   }
   oric->cpu.anybp = any;
+  gdb.need_render = SDL_TRUE;
 
   gdb_send_ok();
 }
@@ -611,6 +643,7 @@ static void gdb_set_watchpoint(struct machine *oric, const char *data, Uint8 fla
       oric->cpu.membreakpoints[i].lastval = oric->cpu.read(&oric->cpu, (Uint16)addr);
       viz_suppress = SDL_FALSE;
       oric->cpu.anymbp = SDL_TRUE;
+      gdb.need_render = SDL_TRUE;
       gdb_send_ok();
       return;
     }
@@ -656,6 +689,7 @@ static void gdb_clear_watchpoint(struct machine *oric, const char *data, Uint8 f
     }
   }
   oric->cpu.anymbp = any;
+  gdb.need_render = SDL_TRUE;
 
   gdb_send_ok();
 }
@@ -664,7 +698,8 @@ static void gdb_clear_watchpoint(struct machine *oric, const char *data, Uint8 f
 /* Single step (mirrors steppy_step from monitor.c)                    */
 /* ------------------------------------------------------------------ */
 
-static void gdb_single_step(struct machine *oric)
+/* Execute one 6502 instruction without sending a stop reply */
+static void gdb_step_one(struct machine *oric)
 {
   m6502_set_icycles(&oric->cpu, SDL_FALSE, mon_bpmsg);
   tape_patches(oric);
@@ -696,8 +731,184 @@ static void gdb_single_step(struct machine *oric)
   }
 
   mon_bpmsg[0] = 0;
+}
 
-  /* Send stop reply with SIGTRAP */
+/* Execute one instruction and send stop reply */
+static void gdb_single_step(struct machine *oric)
+{
+  gdb_step_one(oric);
+  gdb_send_stop_reply(oric, GDB_SIGNAL_TRAP);
+}
+
+/* ------------------------------------------------------------------ */
+/* Temp breakpoint helpers (for step-over / step-out)                  */
+/* ------------------------------------------------------------------ */
+
+/* Set a temporary breakpoint at the given address.
+   Returns SDL_TRUE on success, SDL_FALSE if no slot is available or
+   a user BP already exists at the address (in which case continue
+   will stop there anyway). */
+static SDL_bool gdb_set_temp_bp(struct machine *oric, Uint16 addr)
+{
+  int i;
+
+  /* If a user breakpoint already covers this address, no temp BP needed */
+  for(i = 0; i < 16; i++)
+  {
+    if(oric->cpu.breakpoints[i] == (Sint32)addr)
+      return SDL_TRUE;
+  }
+
+  /* Find empty slot */
+  for(i = 0; i < 16; i++)
+  {
+    if(oric->cpu.breakpoints[i] == -1)
+    {
+      oric->cpu.breakpoints[i] = (Sint32)addr;
+      oric->cpu.anybp = SDL_TRUE;
+      gdb.temp_bp_slot = (Sint32)i;
+      return SDL_TRUE;
+    }
+  }
+
+  return SDL_FALSE; /* no free slot */
+}
+
+/* Clear the temp breakpoint (if any) and recompute anybp */
+static void gdb_clear_temp_bp(struct machine *oric)
+{
+  if(gdb.temp_bp_slot >= 0)
+  {
+    int i;
+    SDL_bool any = SDL_FALSE;
+
+    oric->cpu.breakpoints[gdb.temp_bp_slot] = -1;
+    gdb.temp_bp_slot = -1;
+
+    for(i = 0; i < 16; i++)
+    {
+      if(oric->cpu.breakpoints[i] != -1)
+      {
+        any = SDL_TRUE;
+        break;
+      }
+    }
+    oric->cpu.anybp = any;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Step Over (N command)                                                */
+/* ------------------------------------------------------------------ */
+
+static void gdb_step_over(struct machine *oric)
+{
+  unsigned char opcode;
+
+  viz_suppress = SDL_TRUE;
+  opcode = oric->cpu.read(&oric->cpu, oric->cpu.pc);
+  viz_suppress = SDL_FALSE;
+
+  if(opcode == 0x20) /* JSR */
+  {
+    Uint16 retAddr = oric->cpu.pc + 3;
+    gdb.stepover_start_cycles = (Sint64)oric->cpu.cycles;
+
+    if(gdb_set_temp_bp(oric, retAddr))
+    {
+      /* Use temp breakpoint — let emulator run */
+      setemumode(oric, NULL, EM_RUNNING);
+      gdb.stop_pending = SDL_TRUE;
+    }
+    else
+    {
+      /* Fallback: tight-loop step-over with 5s timeout (like monitor F11) */
+      Uint32 endticks = SDL_GetTicks() + 5000;
+      while(oric->cpu.pc != retAddr && SDL_GetTicks() < endticks)
+        gdb_step_one(oric);
+      gdb.need_render = SDL_TRUE;
+      gdb_send_stop_reply(oric, GDB_SIGNAL_TRAP);
+      gdb.stepover_start_cycles = -1;
+    }
+  }
+  else
+  {
+    /* Not a JSR — just single step */
+    gdb_single_step(oric);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Step Out (O command)                                                 */
+/* ------------------------------------------------------------------ */
+
+static void gdb_step_out(struct machine *oric)
+{
+  Uint8 sp = oric->cpu.sp;
+  unsigned char lo, hi;
+  Uint16 retAddr;
+
+  /* Read return address from stack (JSR pushes PC+2, so retAddr = word+1) */
+  viz_suppress = SDL_TRUE;
+  lo = oric->cpu.read(&oric->cpu, (Uint16)(0x100 + ((sp + 1) & 0xFF)));
+  hi = oric->cpu.read(&oric->cpu, (Uint16)(0x100 + ((sp + 2) & 0xFF)));
+  viz_suppress = SDL_FALSE;
+
+  retAddr = (Uint16)(((hi << 8) | lo) + 1);
+
+  if(gdb_set_temp_bp(oric, retAddr))
+  {
+    setemumode(oric, NULL, EM_RUNNING);
+    gdb.stop_pending = SDL_TRUE;
+  }
+  else
+  {
+    /* Fallback: tight-loop with timeout */
+    Uint32 endticks = SDL_GetTicks() + 5000;
+    while(oric->cpu.pc != retAddr && SDL_GetTicks() < endticks)
+      gdb_step_one(oric);
+    gdb.need_render = SDL_TRUE;
+    gdb_send_stop_reply(oric, GDB_SIGNAL_TRAP);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Skip Instruction (K command)                                        */
+/* ------------------------------------------------------------------ */
+
+static void gdb_skip_instruction(struct machine *oric)
+{
+  unsigned char opcode;
+  int sz;
+
+  viz_suppress = SDL_TRUE;
+  opcode = oric->cpu.read(&oric->cpu, oric->cpu.pc);
+  viz_suppress = SDL_FALSE;
+
+  switch(distab[opcode].amode)
+  {
+    case AM_IMM:
+    case AM_ZP:
+    case AM_ZPX:
+    case AM_ZPY:
+    case AM_ZIX:
+    case AM_ZIY:
+    case AM_REL:
+      sz = 2;
+      break;
+    case AM_ABS:
+    case AM_ABX:
+    case AM_ABY:
+    case AM_IND:
+      sz = 3;
+      break;
+    case AM_IMP:
+    default:
+      sz = 1;
+      break;
+  }
+
+  oric->cpu.pc += sz;
   gdb_send_stop_reply(oric, GDB_SIGNAL_TRAP);
 }
 
@@ -861,6 +1072,66 @@ static void gdb_handle_query(struct machine *oric, const char *data)
     return;
   }
 
+  /* qOricWarp - Query or toggle warp speed */
+  if(strncmp(data, "OricWarp", 8) == 0)
+  {
+    extern SDL_bool warpspeed;
+
+    if(data[8] == ',' && data[9])
+    {
+      /* Set warp state: qOricWarp,1 or qOricWarp,0 */
+      SDL_bool newstate = (data[9] == '1') ? SDL_TRUE : SDL_FALSE;
+      warpspeed = newstate;
+      oric->ay.soundon = !warpspeed;
+      SDL_PauseAudio(warpspeed);
+      gdb_send_ok();
+    }
+    else
+    {
+      /* Query current state */
+      gdb_send_packet(warpspeed ? "1" : "0");
+    }
+    return;
+  }
+
+  /* qOricHardReset - Reload disk images from filesystem and hard-reset the machine */
+  if(strcmp(data, "OricHardReset") == 0)
+  {
+    int i;
+
+    /* Reload any mounted disk images from the filesystem (picks up rebuild) */
+    for(i = 0; i < MAX_DRIVES; i++)
+    {
+      if(oric->wddisk.disk[i] && oric->wddisk.disk[i]->filename[0])
+      {
+        char fname[4096+512];
+        strncpy(fname, oric->wddisk.disk[i]->filename, sizeof(fname)-1);
+        fname[sizeof(fname)-1] = 0;
+        diskimage_load(oric, fname, i);
+      }
+    }
+
+    /* Perform hard reset (same as F4) */
+    resetoric(oric, NULL, 0);
+
+    /* Pause so the debugger can set breakpoints before execution */
+    setemumode(oric, NULL, EM_DEBUG);
+    gdb.stop_pending = SDL_FALSE;
+    gdb.need_render = SDL_TRUE;
+
+    gdb_send_stop_reply(oric, GDB_SIGNAL_TRAP);
+    return;
+  }
+
+  /* qOricResetCycles - Reset CPU cycle counter */
+  if(strcmp(data, "OricResetCycles") == 0)
+  {
+    oric->cpu.cycles = 0;
+    gdb.need_render = SDL_TRUE;
+    gdb_send_ok();
+    return;
+  }
+
   /* qOricCmd - Execute monitor command (hex-encoded), return hex-encoded output */
   if(strncmp(data, "OricCmd,", 8) == 0)
   {
@@ -1021,6 +1292,24 @@ static void gdb_handle_packet(struct machine *oric, const char *data, int len)
         oric->cpu.pc = (Uint16)addr;
       }
       gdb_single_step(oric);
+      gdb.need_render = SDL_TRUE;
+      break;
+
+    case 'N':
+      /* Step over (if JSR, run until return; otherwise single step) */
+      gdb_step_over(oric);
+      gdb.need_render = SDL_TRUE;
+      break;
+
+    case 'O':
+      /* Step out (run until subroutine returns) */
+      gdb_step_out(oric);
+      gdb.need_render = SDL_TRUE;
+      break;
+
+    case 'K':
+      /* Skip instruction (advance PC without executing) */
+      gdb_skip_instruction(oric);
       gdb.need_render = SDL_TRUE;
       break;
 
@@ -1394,6 +1683,10 @@ void gdb_stub_notify_stop(struct machine *oric, int reason)
     return;
 
   gdb.stop_pending = SDL_FALSE;
+
+  /* Clear temp breakpoint if one was set (step-over / step-out) */
+  gdb_clear_temp_bp(oric);
+
   gdb_send_stop_reply(oric, reason);
 }
 

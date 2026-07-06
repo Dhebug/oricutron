@@ -68,6 +68,33 @@ struct symboltable
   struct msym *syms;
 };
 
+/* Addressing modes (used by distab[]) */
+enum
+{
+  AM_IMP=0,
+  AM_IMM,
+  AM_ZP,
+  AM_ZPX,
+  AM_ZPY,
+  AM_ABS,
+  AM_ABX,
+  AM_ABY,
+  AM_ZIX,
+  AM_ZIY,
+  AM_REL,
+  AM_IND
+};
+
+/* Disassembly info per opcode */
+struct disinf
+{
+  char* name;
+  int amode;
+};
+
+/* 256-entry opcode table indexed by opcode byte */
+extern struct disinf distab[];
+
 SDL_bool isws(char c);
 SDL_bool ishex(char c);
 int hexit(char c);

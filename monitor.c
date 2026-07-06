@@ -64,12 +64,6 @@ static char* debug_logname = "debug_log.txt";
 FILE *debug_logfile = NULL;
 #endif
 
-struct disinf
-{
-  char* name;
-  int amode;
-};
-
 struct asminf
 {
   char* name;
@@ -259,22 +253,6 @@ enum
   REG_VIA_CB2
 };
 
-enum
-{
-  AM_IMP=0,
-  AM_IMM,
-  AM_ZP,
-  AM_ZPX,
-  AM_ZPY,
-  AM_ABS,
-  AM_ABX,
-  AM_ABY,
-  AM_ZIX,
-  AM_ZIY,
-  AM_REL,
-  AM_IND
-};
-
 #define AMF_IMP (1<<AM_IMP)
 #define AMF_IMM (1<<AM_IMM)
 #define AMF_ZP  (1<<AM_ZP)
@@ -373,7 +351,7 @@ static struct asminf asmtab[] = { { "BRK", -1, 0x00, -1, -1, -1, -1, -1, -1, -1,
   { NULL, }
 };
 
-static struct disinf distab[] = { { "BRK", AM_IMM },  // 00
+struct disinf distab[] = { { "BRK", AM_IMM },  // 00
   { "ORA", AM_ZIX },  // 01
   { "JAM", AM_IMP },  // 02 (illegal)
   { "SLO", AM_ZIX },  // 03 (illegal)
