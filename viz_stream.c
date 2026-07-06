@@ -84,15 +84,28 @@ Uint8 viz_heat_ula[65536];
   9       1        Video mode (oric->vid_mode)
   10      2        Video address (oric->vid_addr, uint16 LE)
   12      2        Charset address (uint16 LE)
-  14      2        Reserved (0)
+  14      2        Version (0=v0 heatmap-only, 1=v1 with screen)
   16      65536    Read heatmap
   65552   65536    Write heatmap
   131088  65536    ULA heatmap
-  Total: 196624 bytes
+  --- v1 appended data (when version >= 1) ---
+  196624  53760    Screen buffer (oric->scr, 240*224 color indices 0-7)
+  250384  8        vidbases[0..3] (4 x uint16 LE)
+  250392  8000     Video RAM main area (vid_addr .. vid_addr+7999)
+  258392  120      Video RAM bottom 3 rows (vidbases[2] .. vidbases[2]+119)
+  Total v0: 196624 bytes
+  Total v1: 258512 bytes
 */
 
 #define VIZ_FRAME_HEADER  16
 #define VIZ_FRAME_SIZE    (VIZ_FRAME_HEADER + 65536 * 3)
+#define VIZ_VERSION       1
+#define VIZ_SCR_SIZE      (240 * 224)           /* 53760 */
+#define VIZ_VIDBASES_SIZE (4 * 2)               /* 8 */
+#define VIZ_VIDRAM_MAIN   8000
+#define VIZ_VIDRAM_BOTTOM 120
+#define VIZ_V1_EXTRA      (VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN + VIZ_VIDRAM_BOTTOM)
+#define VIZ_FRAME_SIZE_V1 (VIZ_FRAME_SIZE + VIZ_V1_EXTRA)
 #define VIZ_FRAME_SKIP    3   /* Push every N emulated frames (~16.7fps at 50Hz) */
 #define VIZ_DECAY_RATE    8   /* Subtracted per emulated frame */
 
@@ -108,7 +121,7 @@ static struct {
   int port;
   int frame_counter;
   int skip_counter;
-  unsigned char *frame_buf;   /* VIZ_FRAME_SIZE bytes, allocated once */
+  unsigned char *frame_buf;   /* VIZ_FRAME_SIZE_V1 bytes, allocated once */
   int send_offset;            /* Resume offset for partial frame sends */
   SDL_bool frame_pending;     /* True if a partially-sent frame is in progress */
 } viz = {
@@ -196,6 +209,8 @@ static void viz_build_frame(struct machine *oric)
 {
   unsigned char *p;
   Uint16 charset_addr;
+  int i;
+  Uint16 vid_addr, vb2_addr;
 
   if(!viz.frame_buf) return;
 
@@ -220,14 +235,53 @@ static void viz_build_frame(struct machine *oric)
   charset_addr = (oric->vid_mode & 4) ? oric->vidbases[1] : oric->vidbases[3];
   viz_write_u16_le(p + 12, charset_addr);
 
-  /* Reserved */
-  p[14] = 0;
-  p[15] = 0;
+  /* Version */
+  viz_write_u16_le(p + 14, VIZ_VERSION);
 
   /* Copy heatmap arrays */
   memcpy(p + VIZ_FRAME_HEADER, viz_heat_read, 65536);
   memcpy(p + VIZ_FRAME_HEADER + 65536, viz_heat_write, 65536);
   memcpy(p + VIZ_FRAME_HEADER + 65536 * 2, viz_heat_ula, 65536);
+
+  /* --- v1 appended data --- */
+
+  /* Screen buffer (240*224 color indices) */
+  if(oric->scr)
+    memcpy(p + VIZ_FRAME_SIZE, oric->scr, VIZ_SCR_SIZE);
+  else
+    memset(p + VIZ_FRAME_SIZE, 0, VIZ_SCR_SIZE);
+
+  /* vidbases[0..3] */
+  for(i = 0; i < 4; i++)
+    viz_write_u16_le(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + i * 2, oric->vidbases[i]);
+
+  /* Video RAM main area: vid_addr .. vid_addr+7999 (clamped to 64K) */
+  vid_addr = oric->vid_addr;
+  if(vid_addr + VIZ_VIDRAM_MAIN <= 65536)
+    memcpy(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE,
+           oric->mem + vid_addr, VIZ_VIDRAM_MAIN);
+  else
+  {
+    int first = 65536 - vid_addr;
+    memcpy(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE,
+           oric->mem + vid_addr, first);
+    memset(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + first,
+           0, VIZ_VIDRAM_MAIN - first);
+  }
+
+  /* Video RAM bottom 3 rows: vidbases[2] .. vidbases[2]+119 */
+  vb2_addr = oric->vidbases[2];
+  if(vb2_addr + VIZ_VIDRAM_BOTTOM <= 65536)
+    memcpy(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN,
+           oric->mem + vb2_addr, VIZ_VIDRAM_BOTTOM);
+  else
+  {
+    int first = 65536 - vb2_addr;
+    memcpy(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN,
+           oric->mem + vb2_addr, first);
+    memset(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN + first,
+           0, VIZ_VIDRAM_BOTTOM - first);
+  }
 
   viz.send_offset = 0;
   viz.frame_pending = SDL_TRUE;
@@ -238,11 +292,11 @@ static void viz_build_frame(struct machine *oric)
    Returns SDL_TRUE when the entire frame has been sent. */
 static SDL_bool viz_flush_frame(void)
 {
-  while(viz.send_offset < VIZ_FRAME_SIZE)
+  while(viz.send_offset < VIZ_FRAME_SIZE_V1)
   {
     int n = send(viz.client_sock,
                  (const char *)(viz.frame_buf + viz.send_offset),
-                 VIZ_FRAME_SIZE - viz.send_offset, 0);
+                 VIZ_FRAME_SIZE_V1 - viz.send_offset, 0);
     if(n > 0)
     {
       viz.send_offset += n;
@@ -323,7 +377,7 @@ SDL_bool viz_init(struct machine *oric)
   }
 
   /* Allocate frame buffer */
-  viz.frame_buf = (unsigned char *)malloc(VIZ_FRAME_SIZE);
+  viz.frame_buf = (unsigned char *)malloc(VIZ_FRAME_SIZE_V1);
   if(!viz.frame_buf)
   {
     printf("VIZ: failed to allocate frame buffer\n");
@@ -394,6 +448,11 @@ void viz_poll(struct machine *oric, SDL_bool running)
       viz.frame_pending = SDL_FALSE;
       viz.send_offset = 0;
       printf("VIZ: client connected\n");
+
+      /* Send an initial frame immediately so a paused emulator
+         still shows its current screen to the newly connected client */
+      viz_build_frame(oric);
+      viz_flush_frame();
     }
     return;
   }
