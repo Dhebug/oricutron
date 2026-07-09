@@ -124,6 +124,8 @@ static struct {
   unsigned char *frame_buf;   /* VIZ_FRAME_SIZE_V1 bytes, allocated once */
   int send_offset;            /* Resume offset for partial frame sends */
   SDL_bool frame_pending;     /* True if a partially-sent frame is in progress */
+  unsigned char rxbuf[256];   /* Uplink (VS Code -> emulator) receive buffer */
+  int rxlen;                  /* Bytes currently buffered in rxbuf */
 } viz = {
   VIZ_INVALID_SOCKET,
   VIZ_INVALID_SOCKET,
@@ -322,6 +324,118 @@ static SDL_bool viz_flush_frame(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Uplink: input injection (VS Code -> emulator)                       */
+/* ------------------------------------------------------------------ */
+
+/*
+  Uplink message framing (client -> emulator), on the same socket:
+    [opcode:u8][len:u8][payload:len bytes]
+
+  0x01 KEY          payload = [keyid:u8][down:u8]   (down: 1=press 0=release)
+  0x02 RELEASE_ALL  payload = (none)                (panic release on focus loss)
+
+  keyid is SDL-version-agnostic: 0x20..0x7e are passed through as the keysym
+  (SDLK == ASCII for alphanumerics/most punctuation in both SDL1 and SDL2);
+  0x80+ are special keys mapped to SDLK_* here so the extension needs no SDL
+  knowledge.
+*/
+
+/* Map a portable keyid to an SDL keysym understood by ay_keypress()/keytab.
+   Returns 0 for unknown ids (ay_keypress ignores key 0). */
+static SDL_COMPAT_KEY viz_map_key(unsigned char id)
+{
+  switch(id)
+  {
+    case 0x80: return SDLK_UP;
+    case 0x81: return SDLK_DOWN;
+    case 0x82: return SDLK_LEFT;
+    case 0x83: return SDLK_RIGHT;
+    case 0x84: return SDLK_RETURN;
+    case 0x85: return SDLK_ESCAPE;
+    case 0x86: return SDLK_SPACE;
+    case 0x87: return SDLK_BACKSPACE;
+    case 0x88: return SDLK_LSHIFT;
+    case 0x89: return SDLK_LCTRL;
+    case 0x8b: return SDLK_TAB;
+    default:
+      /* Printable ASCII maps straight through to the matching SDLK. */
+      if(id >= 0x20 && id < 0x7f)
+        return (SDL_COMPAT_KEY)id;
+      return 0;
+  }
+}
+
+/* Non-blocking read of inbound uplink messages, dispatching each complete
+   frame.  Detects client disconnect (recv==0). */
+static void viz_process_input(struct machine *oric)
+{
+  int n, off;
+
+  n = recv(viz.client_sock,
+           (char *)(viz.rxbuf + viz.rxlen),
+           (int)(sizeof(viz.rxbuf) - (size_t)viz.rxlen), 0);
+  if(n == 0)
+  {
+    viz_close_client();
+    return;
+  }
+  if(n < 0)
+  {
+    if(!viz_would_block())
+      viz_close_client();
+    return;
+  }
+
+  viz.rxlen += n;
+
+  off = 0;
+  while(viz.rxlen - off >= 2)
+  {
+    unsigned char op  = viz.rxbuf[off];
+    unsigned char len = viz.rxbuf[off + 1];
+    const unsigned char *pl = viz.rxbuf + off + 2;
+
+    if(viz.rxlen - off - 2 < len)
+      break;  /* wait for the rest of the payload */
+
+    switch(op)
+    {
+      case 0x01:  /* KEY */
+        if(len >= 2)
+        {
+          SDL_COMPAT_KEY k = viz_map_key(pl[0]);
+          if(k)
+            ay_keypress(&oric->ay, k, pl[1] ? SDL_TRUE : SDL_FALSE);
+        }
+        break;
+
+      case 0x02:  /* RELEASE_ALL - clear the whole matrix (self-heals on next scan) */
+      {
+        int i;
+        for(i = 0; i < 8; i++)
+          oric->ay.keystates[i] = SDL_FALSE;
+        break;
+      }
+
+      default:
+        break;  /* skip unknown opcodes */
+    }
+
+    off += 2 + len;
+  }
+
+  if(off > 0)
+  {
+    memmove(viz.rxbuf, viz.rxbuf + off, (size_t)(viz.rxlen - off));
+    viz.rxlen -= off;
+  }
+
+  /* Overflow guard: a full buffer with no complete message = desync, resync. */
+  if(viz.rxlen == (int)sizeof(viz.rxbuf))
+    viz.rxlen = 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -457,6 +571,12 @@ void viz_poll(struct machine *oric, SDL_bool running)
     return;
   }
 
+  /* Read inbound uplink messages (keyboard/input) every tick for low latency,
+     even while paused or mid-frame-send.  Also detects client disconnect. */
+  viz_process_input(oric);
+  if(viz.client_sock == VIZ_INVALID_SOCKET)
+    return;
+
   /* If a partial frame is still being sent, finish it first */
   if(viz.frame_pending)
   {
@@ -474,21 +594,7 @@ void viz_poll(struct machine *oric, SDL_bool running)
     return;
   viz.skip_counter = 0;
 
-  /* Check if client is still alive by peeking */
-  {
-    char peek;
-    int n = recv(viz.client_sock, &peek, 1, MSG_PEEK);
-    if(n == 0)
-    {
-      viz_close_client();
-      return;
-    }
-    else if(n < 0 && !viz_would_block())
-    {
-      viz_close_client();
-      return;
-    }
-  }
+  /* Liveness is now handled by viz_process_input above (detects recv==0). */
 
   /* Build new frame and start sending */
   viz_build_frame(oric);
