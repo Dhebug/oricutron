@@ -498,7 +498,10 @@ static void gdb_read_memory(struct machine *oric, const char *data)
   viz_suppress = SDL_TRUE;
   for(i = 0; i < len; i++)
   {
-    unsigned char byte = oric->cpu.read(&oric->cpu, (Uint16)((addr + i) & 0xffff));
+    /* Use mon_read (not cpu.read) so inspecting I/O ranges (VIA/ACIA/disk)
+       cannot alter emulation state - reading them via cpu.read clears IRQ
+       flags, pops data registers and advances FDC state (heisenbug). */
+    unsigned char byte = mon_read(oric, (unsigned short)((addr + i) & 0xffff));
     hex_byte(p, byte);
     p += 2;
   }

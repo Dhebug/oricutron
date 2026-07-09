@@ -104,6 +104,9 @@ void mon_init(struct machine *oric);
 void mon_render(struct machine *oric);
 void mon_update_regs(struct machine *oric);
 void mon_update(struct machine *oric);
+/* Side-effect-free memory read for debugger inspection: returns benign values
+   for I/O ranges (VIA/ACIA/disk) instead of triggering hardware side effects. */
+unsigned char mon_read(struct machine *oric, unsigned short addr);
 SDL_bool mon_event(SDL_Event *ev, struct machine *oric, SDL_bool *needrender);
 void dbg_printf(char* fmt, ...);
 void mon_printf_above(char* fmt, ...);
