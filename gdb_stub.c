@@ -1135,6 +1135,30 @@ static void gdb_handle_query(struct machine *oric, const char *data)
     return;
   }
 
+  /* qOricBreakpoints - List current execution breakpoint addresses as
+     comma-separated 4-hex values, excluding the stub's internal temp step
+     breakpoint. The stub and monitor share one breakpoint table, so this lets
+     the debug adapter detect breakpoints set by hand in Oricutron's monitor
+     (any address here that the adapter didn't arm itself). */
+  if(strcmp(data, "OricBreakpoints") == 0)
+  {
+    /* "bp:" prefix so the adapter can distinguish a genuinely empty list ("bp:")
+       from an old stub that doesn't know this query (empty packet). */
+    char buf[3 + 16*5 + 1];
+    int i, n;
+    strcpy(buf, "bp:");
+    n = 3;
+    for(i = 0; i < 16; i++)
+    {
+      if(oric->cpu.breakpoints[i] == -1) continue;
+      if((Sint32)i == gdb.temp_bp_slot) continue;
+      n += sprintf(buf + n, (n > 3) ? ",%04x" : "%04x",
+                   (unsigned)(oric->cpu.breakpoints[i] & 0xffff));
+    }
+    gdb_send_packet(buf);
+    return;
+  }
+
   /* qOricCmd - Execute monitor command (hex-encoded), return hex-encoded output */
   if(strncmp(data, "OricCmd,", 8) == 0)
   {

@@ -3,6 +3,9 @@ Oricutron ChangeLog
 
 pre-release changes (work in progress)
 --------------------------------------
+* Added qOricBreakpoints GDB query listing current execution breakpoints
+  - Reports breakpoints set by hand in the monitor to the connected debugger
+  - Excludes the stub's internal temp step breakpoint; "bp:"-prefixed reply
 * Added memory access heatmap visualization stream (TCP on gdb_port+1)
   - Tracks CPU reads, writes, and ULA video fetches across the full 64KB address space
   - Pushes binary frames at ~16fps to a connected client (e.g. VS Code webview)
