@@ -743,6 +743,27 @@ static void gdb_single_step(struct machine *oric)
   gdb_send_stop_reply(oric, GDB_SIGNAL_TRAP);
 }
 
+/* If the CPU is parked on a user execution breakpoint, execute exactly one
+   instruction with breakpoint checking disabled (dobp=FALSE) so a following
+   EM_RUNNING resume (continue / step-over of a JSR / step-out) doesn't
+   immediately re-break at the same PC. The 6502 core checks breakpoints BEFORE
+   executing the upcoming instruction, so without this a resume from a PC that
+   holds a breakpoint never advances. Mirrors the monitor's F2 "in case we're on
+   a breakpoint" prologue (monitor.c). No-op if the PC isn't on a breakpoint. */
+static void gdb_step_off_breakpoint(struct machine *oric)
+{
+  int i;
+  if(!oric->cpu.anybp) return;
+  for(i = 0; i < 16; i++)
+  {
+    if(oric->cpu.breakpoints[i] == (Sint32)oric->cpu.pc)
+    {
+      gdb_step_one(oric);
+      return;
+    }
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Temp breakpoint helpers (for step-over / step-out)                  */
 /* ------------------------------------------------------------------ */
@@ -819,7 +840,9 @@ static void gdb_step_over(struct machine *oric)
 
     if(gdb_set_temp_bp(oric, retAddr))
     {
-      /* Use temp breakpoint — let emulator run */
+      /* Use temp breakpoint — let emulator run. Step off first if the JSR itself
+         carries a breakpoint, else the run would re-break at it immediately. */
+      gdb_step_off_breakpoint(oric);
       setemumode(oric, NULL, EM_RUNNING);
       gdb.stop_pending = SDL_TRUE;
     }
@@ -861,6 +884,9 @@ static void gdb_step_out(struct machine *oric)
 
   if(gdb_set_temp_bp(oric, retAddr))
   {
+    /* Step off first if the current instruction carries a breakpoint, else the
+       run would re-break at it immediately and never reach the return address. */
+    gdb_step_off_breakpoint(oric);
     setemumode(oric, NULL, EM_RUNNING);
     gdb.stop_pending = SDL_TRUE;
   }
@@ -1305,6 +1331,9 @@ static void gdb_handle_packet(struct machine *oric, const char *data, int len)
         hex_parse(data + 1, &addr);
         oric->cpu.pc = (Uint16)addr;
       }
+      /* NB: the debug adapter already single-steps off a breakpoint at PC before
+         issuing continue, so no step-off prologue here (adding one would skip a
+         breakpoint on the immediately-following instruction). */
       setemumode(oric, NULL, EM_RUNNING);
       gdb.stop_pending = SDL_TRUE;
       break;

@@ -1644,12 +1644,15 @@ void frameloop_overclock(struct machine *oric, SDL_bool *framedone, SDL_bool *ne
       {
         if(m6502_set_icycles(&oric->cpu, SDL_TRUE, mon_bpmsg))
         {
+          /* Notify the GDB client BEFORE setemumode()/mon_enter(), which prints and
+             CLEARS mon_bpmsg — otherwise the watchpoint address is lost from the
+             stop reply and the debugger can't tell it was a watchpoint hit. */
+          gdb_stub_notify_stop(oric, GDB_SIGNAL_TRAP);
 #ifndef WWW_NO_MONITOR
           // Hit breakpoint
           setemumode(oric, NULL, EM_DEBUG);
           *needrender = SDL_TRUE;
 #endif
-          gdb_stub_notify_stop(oric, GDB_SIGNAL_TRAP);
           break;
         }
 
@@ -1720,12 +1723,15 @@ void frameloop_normal(struct machine *oric, SDL_bool *framedone, SDL_bool *needr
     {
       if(m6502_set_icycles(&oric->cpu, SDL_TRUE, mon_bpmsg))
       {
+        /* Notify the GDB client BEFORE setemumode()/mon_enter(), which prints and
+           CLEARS mon_bpmsg — otherwise the watchpoint address is lost from the
+           stop reply and the debugger can't tell it was a watchpoint hit. */
+        gdb_stub_notify_stop(oric, GDB_SIGNAL_TRAP);
 #ifndef WWW_NO_MONITOR
         // Hit breakpoint
         setemumode(oric, NULL, EM_DEBUG);
         *needrender = SDL_TRUE;
 #endif
-        gdb_stub_notify_stop(oric, GDB_SIGNAL_TRAP);
         break;
       }
 

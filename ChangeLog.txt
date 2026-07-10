@@ -3,6 +3,11 @@ Oricutron ChangeLog
 
 pre-release changes (work in progress)
 --------------------------------------
+* Fixed memory watchpoint hits not reaching the GDB client during a run: the
+  stop reply is now sent before setemumode()/mon_enter() clears the breakpoint
+  message, so the watchpoint address is included (was causing a re-trigger loop)
+* Fixed GDB step-over ('N' on a JSR) and step-out ('O') getting stuck when the
+  PC sits on a breakpoint — now step off it first, like the monitor's continue
 * Added qOricBreakpoints GDB query listing current execution breakpoints
   - Reports breakpoints set by hand in the monitor to the connected debugger
   - Excludes the stub's internal temp step breakpoint; "bp:"-prefixed reply
