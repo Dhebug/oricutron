@@ -77,37 +77,49 @@ Uint8 viz_heat_ula[65536];
 /* ------------------------------------------------------------------ */
 
 /*
-  Offset  Size     Field
-  0       4        Magic "OVIC" (0x4F564943)
-  4       4        Frame counter (uint32 LE)
-  8       1        ROMDIS state (0 or 1)
-  9       1        Video mode (oric->vid_mode)
-  10      2        Video address (oric->vid_addr, uint16 LE)
-  12      2        Charset address (uint16 LE)
-  14      2        Version (0=v0 heatmap-only, 1=v1 with screen)
-  16      65536    Read heatmap
-  65552   65536    Write heatmap
-  131088  65536    ULA heatmap
-  --- v1 appended data (when version >= 1) ---
-  196624  53760    Screen buffer (oric->scr, 240*224 color indices 0-7)
-  250384  8        vidbases[0..3] (4 x uint16 LE)
-  250392  8000     Video RAM main area (vid_addr .. vid_addr+7999)
-  258392  120      Video RAM bottom 3 rows (vidbases[2] .. vidbases[2]+119)
-  Total v0: 196624 bytes
-  Total v1: 258512 bytes
+  Binary frame - v2 (current). Little-endian, variable length.
+
+  Header (16 bytes):
+    0   4   Magic "OVIC" (0x4F564943)
+    4   4   Frame counter (uint32)
+    8   1   ROMDIS state (0/1)
+    9   1   Video mode (oric->vid_mode)
+    10  2   Video address (oric->vid_addr)
+    12  2   Charset address
+    14  2   Version (= 2)
+
+  Heat deltas (variable): three run-lists in order read, write, ULA. Each is
+    u16 nRuns, then nRuns x (u16 start, u16 len)
+  A run means addresses [start, start+len) were accessed this frame (full heat).
+  The emulator clears its touched flags after each frame; the CLIENT decays
+  (-VIZ_DECAY_RATE per frame) and applies these runs. No keyframe: a decaying
+  view needs no baseline, so a fresh client converges within the decay window.
+
+  Screen block (fixed, follows the heat deltas):
+    scr       53760   Screen buffer (240*224 colour indices 0-7)
+    vidbases  8       vidbases[0..3] (4 x uint16)
+    vidram    8000    Video RAM main area (vid_addr .. vid_addr+7999)
+    vidram    120     Video RAM bottom 3 rows (vidbases[2] .. vidbases[2]+119)
+
+  Legacy: v0 = header + 3x65536 full heatmaps; v1 = v0 + the screen block. The
+  consumer still parses those; the emulator now emits only v2.
 */
 
 #define VIZ_FRAME_HEADER  16
-#define VIZ_FRAME_SIZE    (VIZ_FRAME_HEADER + 65536 * 3)
-#define VIZ_VERSION       1
+#define VIZ_VERSION       2   /* v2: heat sent as per-frame DELTAS (run-lists); client decays */
 #define VIZ_SCR_SIZE      (240 * 224)           /* 53760 */
 #define VIZ_VIDBASES_SIZE (4 * 2)               /* 8 */
 #define VIZ_VIDRAM_MAIN   8000
 #define VIZ_VIDRAM_BOTTOM 120
 #define VIZ_V1_EXTRA      (VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN + VIZ_VIDRAM_BOTTOM)
-#define VIZ_FRAME_SIZE_V1 (VIZ_FRAME_SIZE + VIZ_V1_EXTRA)
-#define VIZ_FRAME_SKIP    3   /* Push every N emulated frames (~16.7fps at 50Hz) */
-#define VIZ_DECAY_RATE    8   /* Subtracted per emulated frame */
+/* Each heat array is emitted as a run-list: [u16 nRuns][nRuns x (u16 start, u16 len)],
+   covering the non-zero spans touched since the last push. Worst case is an
+   alternating touched/untouched pattern = 32768 single-byte runs. */
+#define VIZ_HEAT_MAX_BYTES (2 + 32768 * 4)
+#define VIZ_FRAME_BUF_MAX  (VIZ_FRAME_HEADER + VIZ_HEAT_MAX_BYTES * 3 + VIZ_V1_EXTRA)
+#define VIZ_FRAME_SKIP    1   /* push every emulated frame (~50fps) — heat is now tiny */
+#define VIZ_DECAY_RATE    8   /* reference rate; decay is now client-side — the
+                                 consumer's HEAT_DECAY (extension.js) MUST match this */
 
 /* ------------------------------------------------------------------ */
 /* Internal state                                                      */
@@ -121,7 +133,8 @@ static struct {
   int port;
   int frame_counter;
   int skip_counter;
-  unsigned char *frame_buf;   /* VIZ_FRAME_SIZE_V1 bytes, allocated once */
+  unsigned char *frame_buf;   /* VIZ_FRAME_BUF_MAX bytes, allocated once */
+  int frame_len;              /* Actual length of the current frame (variable in v2) */
   int send_offset;            /* Resume offset for partial frame sends */
   SDL_bool frame_pending;     /* True if a partially-sent frame is in progress */
   unsigned char rxbuf[256];   /* Uplink (VS Code -> emulator) receive buffer */
@@ -134,9 +147,10 @@ static struct {
   0,
   0,
   0,
-  NULL,
-  0,
-  SDL_FALSE
+  NULL,       /* frame_buf */
+  0,          /* frame_len */
+  0,          /* send_offset */
+  SDL_FALSE   /* frame_pending */
 };
 
 /* ------------------------------------------------------------------ */
@@ -206,85 +220,102 @@ static void viz_write_u32_le(unsigned char *dst, Uint32 val)
   dst[3] = (unsigned char)((val >> 24) & 0xff);
 }
 
-/* Build frame into viz.frame_buf, mark as pending for sending */
+/* Emit heat[] as a run-list into p: [u16 nRuns][nRuns x (u16 start, u16 len)]
+   covering the non-zero spans (addresses touched since the last push). Returns
+   bytes written. Does NOT clear heat[] (the caller does, once). */
+static int viz_emit_runs(unsigned char *p, const Uint8 *heat)
+{
+  int i = 0, out = 2, nruns = 0;
+  while(i < 65536)
+  {
+    if(heat[i])
+    {
+      int start = i, len;
+      while(i < 65536 && heat[i] && (i - start) < 0xffff) i++;
+      len = i - start;
+      p[out++] = (unsigned char)(start & 0xff);
+      p[out++] = (unsigned char)((start >> 8) & 0xff);
+      p[out++] = (unsigned char)(len & 0xff);
+      p[out++] = (unsigned char)((len >> 8) & 0xff);
+      nruns++;
+    }
+    else
+    {
+      i++;
+    }
+  }
+  p[0] = (unsigned char)(nruns & 0xff);
+  p[1] = (unsigned char)((nruns >> 8) & 0xff);
+  return out;
+}
+
+/* Build a v2 frame into viz.frame_buf and mark it pending.
+   Layout: 16-byte header, then 3 heat-delta run-lists (read/write/ula), then the
+   screen block (screen + vidbases + vidram). The heat arrays are per-frame
+   "touched" flags (set to 255 on access) and are CLEARED here after emission —
+   decay is done client-side. Frame length is variable (viz.frame_len). */
 static void viz_build_frame(struct machine *oric)
 {
   unsigned char *p;
   Uint16 charset_addr;
-  int i;
+  int i, off;
   Uint16 vid_addr, vb2_addr;
 
   if(!viz.frame_buf) return;
 
   p = viz.frame_buf;
 
-  /* Magic */
+  /* Header */
   p[0] = 'O'; p[1] = 'V'; p[2] = 'I'; p[3] = 'C';
-
-  /* Frame counter */
   viz_write_u32_le(p + 4, (Uint32)viz.frame_counter);
-
-  /* ROMDIS */
   p[8] = oric->romdis ? 1 : 0;
-
-  /* Video mode */
   p[9] = (unsigned char)(oric->vid_mode & 0xff);
-
-  /* Video address */
   viz_write_u16_le(p + 10, oric->vid_addr);
-
-  /* Charset address */
   charset_addr = (oric->vid_mode & 4) ? oric->vidbases[1] : oric->vidbases[3];
   viz_write_u16_le(p + 12, charset_addr);
-
-  /* Version */
   viz_write_u16_le(p + 14, VIZ_VERSION);
 
-  /* Copy heatmap arrays */
-  memcpy(p + VIZ_FRAME_HEADER, viz_heat_read, 65536);
-  memcpy(p + VIZ_FRAME_HEADER + 65536, viz_heat_write, 65536);
-  memcpy(p + VIZ_FRAME_HEADER + 65536 * 2, viz_heat_ula, 65536);
+  /* Heat deltas (run-lists), then clear the touched flags for the next frame */
+  off = VIZ_FRAME_HEADER;
+  off += viz_emit_runs(p + off, viz_heat_read);
+  off += viz_emit_runs(p + off, viz_heat_write);
+  off += viz_emit_runs(p + off, viz_heat_ula);
+  memset(viz_heat_read,  0, 65536);
+  memset(viz_heat_write, 0, 65536);
+  memset(viz_heat_ula,   0, 65536);
 
-  /* --- v1 appended data --- */
-
-  /* Screen buffer (240*224 color indices) */
+  /* Screen block (unchanged from v1), placed after the variable-length heat */
   if(oric->scr)
-    memcpy(p + VIZ_FRAME_SIZE, oric->scr, VIZ_SCR_SIZE);
+    memcpy(p + off, oric->scr, VIZ_SCR_SIZE);
   else
-    memset(p + VIZ_FRAME_SIZE, 0, VIZ_SCR_SIZE);
+    memset(p + off, 0, VIZ_SCR_SIZE);
 
-  /* vidbases[0..3] */
   for(i = 0; i < 4; i++)
-    viz_write_u16_le(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + i * 2, oric->vidbases[i]);
+    viz_write_u16_le(p + off + VIZ_SCR_SIZE + i * 2, oric->vidbases[i]);
 
-  /* Video RAM main area: vid_addr .. vid_addr+7999 (clamped to 64K) */
   vid_addr = oric->vid_addr;
   if(vid_addr + VIZ_VIDRAM_MAIN <= 65536)
-    memcpy(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE,
-           oric->mem + vid_addr, VIZ_VIDRAM_MAIN);
+    memcpy(p + off + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE, oric->mem + vid_addr, VIZ_VIDRAM_MAIN);
   else
   {
     int first = 65536 - vid_addr;
-    memcpy(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE,
-           oric->mem + vid_addr, first);
-    memset(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + first,
-           0, VIZ_VIDRAM_MAIN - first);
+    memcpy(p + off + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE, oric->mem + vid_addr, first);
+    memset(p + off + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + first, 0, VIZ_VIDRAM_MAIN - first);
   }
 
-  /* Video RAM bottom 3 rows: vidbases[2] .. vidbases[2]+119 */
   vb2_addr = oric->vidbases[2];
   if(vb2_addr + VIZ_VIDRAM_BOTTOM <= 65536)
-    memcpy(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN,
-           oric->mem + vb2_addr, VIZ_VIDRAM_BOTTOM);
+    memcpy(p + off + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN, oric->mem + vb2_addr, VIZ_VIDRAM_BOTTOM);
   else
   {
     int first = 65536 - vb2_addr;
-    memcpy(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN,
-           oric->mem + vb2_addr, first);
-    memset(p + VIZ_FRAME_SIZE + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN + first,
-           0, VIZ_VIDRAM_BOTTOM - first);
+    memcpy(p + off + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN, oric->mem + vb2_addr, first);
+    memset(p + off + VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN + first, 0, VIZ_VIDRAM_BOTTOM - first);
   }
 
+  off += VIZ_V1_EXTRA;
+
+  viz.frame_len = off;
   viz.send_offset = 0;
   viz.frame_pending = SDL_TRUE;
   viz.frame_counter++;
@@ -294,11 +325,11 @@ static void viz_build_frame(struct machine *oric)
    Returns SDL_TRUE when the entire frame has been sent. */
 static SDL_bool viz_flush_frame(void)
 {
-  while(viz.send_offset < VIZ_FRAME_SIZE_V1)
+  while(viz.send_offset < viz.frame_len)
   {
     int n = send(viz.client_sock,
                  (const char *)(viz.frame_buf + viz.send_offset),
-                 VIZ_FRAME_SIZE_V1 - viz.send_offset, 0);
+                 viz.frame_len - viz.send_offset, 0);
     if(n > 0)
     {
       viz.send_offset += n;
@@ -490,8 +521,8 @@ SDL_bool viz_init(struct machine *oric)
     return SDL_FALSE;
   }
 
-  /* Allocate frame buffer */
-  viz.frame_buf = (unsigned char *)malloc(VIZ_FRAME_SIZE_V1);
+  /* Allocate frame buffer (sized for the worst-case heat run-lists + screen) */
+  viz.frame_buf = (unsigned char *)malloc(VIZ_FRAME_BUF_MAX);
   if(!viz.frame_buf)
   {
     printf("VIZ: failed to allocate frame buffer\n");
@@ -563,8 +594,13 @@ void viz_poll(struct machine *oric, SDL_bool running)
       viz.send_offset = 0;
       printf("VIZ: client connected\n");
 
-      /* Send an initial frame immediately so a paused emulator
-         still shows its current screen to the newly connected client */
+      /* No keyframe: the heatmap is a decaying view, so clear the touched flags
+         (which accumulated while no client was attached) before the first build.
+         The initial frame then carries an empty heat delta plus the current
+         screen — the client converges within the decay window as code runs. */
+      memset(viz_heat_read,  0, 65536);
+      memset(viz_heat_write, 0, 65536);
+      memset(viz_heat_ula,   0, 65536);
       viz_build_frame(oric);
       viz_flush_frame();
     }
@@ -603,26 +639,7 @@ void viz_poll(struct machine *oric, SDL_bool running)
 
 void viz_frame_decay(void)
 {
-  int i;
-
-  if(!viz_tracking)
-    return;
-
-  for(i = 0; i < 65536; i++)
-  {
-    if(viz_heat_read[i] > VIZ_DECAY_RATE)
-      viz_heat_read[i] -= VIZ_DECAY_RATE;
-    else
-      viz_heat_read[i] = 0;
-
-    if(viz_heat_write[i] > VIZ_DECAY_RATE)
-      viz_heat_write[i] -= VIZ_DECAY_RATE;
-    else
-      viz_heat_write[i] = 0;
-
-    if(viz_heat_ula[i] > VIZ_DECAY_RATE)
-      viz_heat_ula[i] -= VIZ_DECAY_RATE;
-    else
-      viz_heat_ula[i] = 0;
-  }
+  /* v2: decay is done client-side (the emulator now sends per-frame access
+     deltas and clears its touched flags in viz_build_frame). Kept as a no-op so
+     the main-loop call site (once_per_frame) is undisturbed. */
 }
