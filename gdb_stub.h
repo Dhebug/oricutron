@@ -46,6 +46,11 @@ SDL_bool gdb_stub_is_connected(void);
 /* Returns SDL_TRUE if the GDB server is initialized (listening for connections). */
 SDL_bool gdb_stub_is_listening(void);
 
+/* Reset transient stub state after the machine is reinitialized under an attached
+   client (machine-type switch): drops a dangling temp breakpoint and pending-stop
+   so the stub can't hang. Safe to call unconditionally; no-op if nothing pending. */
+void gdb_stub_machine_reset(struct machine *oric);
+
 /* Stop reason codes */
 #define GDB_SIGNAL_INT   2   /* SIGINT - interrupt */
 #define GDB_SIGNAL_TRAP  5   /* SIGTRAP - breakpoint/step */

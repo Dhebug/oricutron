@@ -66,6 +66,7 @@ void m6502_init(struct m6502 *cpu, void* userdata, SDL_bool nukebreakpoints)
     for(i=0; i<16; i++)
     {
       cpu->breakpoints[i] = -1;
+      cpu->breakpoint_flags[i] = 0;   /* clear execution-breakpoint flags too, not just membreakpoints */
       cpu->membreakpoints[i].flags = 0;
     }
     cpu->anybp = SDL_FALSE;

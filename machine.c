@@ -57,6 +57,7 @@
 #include "tape.h"
 #include "keyboard.h"
 #include "viz_stream.h"
+#include "gdb_stub.h"
 
 extern SDL_bool warpspeed, soundavailable, soundon;
 extern char diskpath[], diskfile[], filetmp[];
@@ -2297,5 +2298,10 @@ void swapmach(struct machine *oric, struct osdmenuitem *mitem, int which)
 #endif
     exit(EXIT_FAILURE);
   }
+
+  /* init_machine nuked the CPU breakpoint/watchpoint tables. If a GDB client is
+     attached, drop the stub's now-dangling temp bp / pending-stop so it can't hang. */
+  if(gdb_stub_is_listening())
+    gdb_stub_machine_reset(oric);
 }
 

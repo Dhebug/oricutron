@@ -571,6 +571,10 @@ static void gdb_set_breakpoint(struct machine *oric, const char *data)
     if(oric->cpu.breakpoints[i] == -1)
     {
       oric->cpu.breakpoints[i] = (Sint32)addr;
+      /* Plain execution breakpoint: it must simply STOP. Clear any stale monitor
+         flags left in this slot (e.g. MBPF_RESETCYCLESCONTINUE from a prior `b .. c`
+         then `bc`) — otherwise 6502.c:330 would arm the breakpoint but not stop. */
+      oric->cpu.breakpoint_flags[i] = 0;
       oric->cpu.anybp = SDL_TRUE;
       gdb.need_render = SDL_TRUE;
       gdb_send_ok();
@@ -642,8 +646,12 @@ static void gdb_set_watchpoint(struct machine *oric, const char *data, Uint8 fla
     {
       oric->cpu.membreakpoints[i].addr = (Uint16)addr;
       oric->cpu.membreakpoints[i].flags = flags;
+      /* Seed lastval with a side-effect-free read: cpu.read() on an I/O register
+         (e.g. a VIA T1 latch) would clear pending IRQs just by ARMING the watch.
+         mon_read is the same read the monitor uses (89b82fe). viz_suppress kept so
+         the arm doesn't pollute the heatmap. */
       viz_suppress = SDL_TRUE;
-      oric->cpu.membreakpoints[i].lastval = oric->cpu.read(&oric->cpu, (Uint16)addr);
+      oric->cpu.membreakpoints[i].lastval = mon_read(oric, (Uint16)addr);
       viz_suppress = SDL_FALSE;
       oric->cpu.anymbp = SDL_TRUE;
       gdb.need_render = SDL_TRUE;
@@ -789,6 +797,7 @@ static SDL_bool gdb_set_temp_bp(struct machine *oric, Uint16 addr)
     if(oric->cpu.breakpoints[i] == -1)
     {
       oric->cpu.breakpoints[i] = (Sint32)addr;
+      oric->cpu.breakpoint_flags[i] = 0; /* plain stop; clear stale monitor flags (see gdb_set_breakpoint) */
       oric->cpu.anybp = SDL_TRUE;
       gdb.temp_bp_slot = (Sint32)i;
       return SDL_TRUE;
@@ -819,6 +828,17 @@ static void gdb_clear_temp_bp(struct machine *oric)
     }
     oric->cpu.anybp = any;
   }
+}
+
+/* Called when the machine is reinitialized under an attached client (e.g. a
+   machine-type switch via the menu). init_machine nukes the CPU breakpoint and
+   watchpoint tables, so any pending stop and the temp-bp slot are now dangling.
+   Drop that transient state so a half-finished stop/step can't hang the stub; the
+   client re-syncs its breakpoints on its next interaction. */
+void gdb_stub_machine_reset(struct machine *oric)
+{
+  gdb_clear_temp_bp(oric);
+  gdb.stop_pending = SDL_FALSE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1142,6 +1162,10 @@ static void gdb_handle_query(struct machine *oric, const char *data)
 
     /* Perform hard reset (same as F4) */
     resetoric(oric, NULL, 0);
+
+    /* Drop any in-progress step's temp breakpoint and its (now dangling) slot index
+       so it can't later delete a reused breakpoint slot. */
+    gdb_clear_temp_bp(oric);
 
     /* Pause so the debugger can set breakpoints before execution */
     setemumode(oric, NULL, EM_DEBUG);
@@ -1488,6 +1512,10 @@ static SDL_bool gdb_process_data(struct machine *oric)
       if(oric->emu_mode == EM_RUNNING)
       {
         setemumode(oric, NULL, EM_DEBUG);
+        /* Interrupting cancels any in-progress step-over: drop its one-shot temp
+           breakpoint so it can't fire later (or, if its slot gets reused by a user
+           breakpoint, get that user breakpoint deleted). */
+        gdb_clear_temp_bp(oric);
         gdb.stop_pending = SDL_FALSE;
         gdb.need_render = SDL_TRUE;
         gdb_send_stop_reply(oric, GDB_SIGNAL_INT);
