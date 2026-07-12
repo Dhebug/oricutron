@@ -19,7 +19,7 @@
 **  Memory access heatmap visualization stream
 **
 **  Pushes binary frames over TCP to a connected client (VS Code webview).
-**  Port is auto-derived as gdb_port + 16 (see viz_init; kept clear of +1).
+**  Port is auto-derived as gdb_port + 1 (see viz_init).
 */
 
 #include <stdlib.h>
@@ -482,10 +482,10 @@ SDL_bool viz_init(struct machine *oric)
   if(oric->gdb_port <= 0)
     return SDL_FALSE;
 
-  /* Offset +16 (not +1) so the viz port can't collide with a debug session on an
-     adjacent gdb port (e.g. a second Oricutron using base+1 for its own gdb stub).
-     MUST match VIZ_PORT_OFFSET in the VS Code extension. */
-  port = oric->gdb_port + 16;
+  /* Viz port = gdb port + 1, so the two sit together in a port scanner. The VS Code
+     extension auto-picks a free gdb port and verifies gdb+1 is free too, so there is
+     no collision. MUST match VIZ_PORT_OFFSET in the VS Code extension. */
+  port = oric->gdb_port + 1;
 
   if(!viz_socket_init())
   {
