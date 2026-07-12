@@ -1008,6 +1008,20 @@ SDL_bool init(struct machine *oric, int argc, char* argv[])
             continue;
           }
 
+          if(strcasecmp(tmp, "gdb_break") == 0)
+          {
+            /* Initial breakpoint for the GDB stub, always hex (optionally $/0x
+               prefixed). Armed when the stub binds so the emulator halts at the
+               program entry and waits for the debugger to connect. */
+            if(opt_arg)
+            {
+              const char *a = opt_arg;
+              if(a[0] == '$') a++;
+              oric->gdb_break = (int)strtol(a, NULL, 16);
+            }
+            continue;
+          }
+
           if(strcasecmp(tmp, "vsynchack") == 0)
           {
             if(!on_or_off(argv[i-1], opt_arg, &oric->vsynchack)) exit(EXIT_FAILURE);

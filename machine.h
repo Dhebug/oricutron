@@ -271,6 +271,9 @@ struct machine
   char aciabackendname[ACIA_BACKEND_NAME_LEN];
 
   int gdb_port;   /* GDB RSP server port (0 = disabled) */
+  int gdb_break;  /* Initial breakpoint address armed when the GDB stub binds, so the
+                     emulator halts at the program entry and waits for the client
+                     regardless of connect timing (-1 = none). See --gdb_break. */
 };
 
 void setromon(struct machine *oric);

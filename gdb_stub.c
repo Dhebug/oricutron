@@ -1605,8 +1605,6 @@ SDL_bool gdb_stub_init(struct machine *oric, int port)
   struct sockaddr_in addr;
   int on = 1;
 
-  (void)oric;
-
   if(gdb.initialized)
     return SDL_TRUE;
 
@@ -1654,6 +1652,29 @@ SDL_bool gdb_stub_init(struct machine *oric, int port)
   gdb.stop_pending = SDL_FALSE;
 
   printf("GDB: server listening on port %d\n", port);
+
+  /* Arm the initial breakpoint (--gdb_break) now, while the stub binds. When the
+     emulator reaches this address (e.g. the program's entry, right after the tape
+     auto-loads) it halts and waits for the debugger to connect — no matter how long
+     the client takes, so we never miss the entry. The client removes it on connect
+     (after installing its own breakpoints). Uses a free slot so it doesn't clash with
+     a --breakpoint or a client Z0; flags = 0 (plain stop, see gdb_set_breakpoint). */
+  if(oric->gdb_break >= 0)
+  {
+    int i;
+    for(i = 0; i < 16; i++)
+    {
+      if(oric->cpu.breakpoints[i] == -1)
+      {
+        oric->cpu.breakpoints[i] = oric->gdb_break & 0xffff;
+        oric->cpu.breakpoint_flags[i] = 0;
+        oric->cpu.anybp = SDL_TRUE;
+        printf("GDB: initial breakpoint armed at $%04X\n", oric->gdb_break & 0xffff);
+        break;
+      }
+    }
+  }
+
   return SDL_TRUE;
 }
 
