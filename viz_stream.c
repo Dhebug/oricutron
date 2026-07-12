@@ -112,6 +112,23 @@ Uint8 viz_heat_ula[65536];
 #define VIZ_VIDRAM_MAIN   8000
 #define VIZ_VIDRAM_BOTTOM 120
 #define VIZ_V1_EXTRA      (VIZ_SCR_SIZE + VIZ_VIDBASES_SIZE + VIZ_VIDRAM_MAIN + VIZ_VIDRAM_BOTTOM)
+
+/* Hash of the rendered framebuffer (oric->scr) in the last frame we built. Lets us
+   detect when the picture actually changed — used to push a fresh frame while paused
+   (single-stepping) without spamming unchanged screens. */
+static Uint32 viz_last_scr_hash = 0;
+
+/* FNV-1a over the rendered framebuffer. Cheap; catches any pixel change, whatever the
+   cause (character, redefined font, attribute, or a resolution switch that re-renders). */
+static Uint32 viz_hash_scr(struct machine *oric)
+{
+  Uint32 h = 2166136261u;
+  int i;
+  if(!oric->scr) return 0;
+  for(i = 0; i < VIZ_SCR_SIZE; i++) { h ^= oric->scr[i]; h *= 16777619u; }
+  return h;
+}
+
 /* Each heat array is emitted as a run-list: [u16 nRuns][nRuns x (u16 start, u16 len)],
    covering the non-zero spans touched since the last push. Worst case is an
    alternating touched/untouched pattern = 32768 single-byte runs. */
@@ -289,6 +306,7 @@ static void viz_build_frame(struct machine *oric)
     memcpy(p + off, oric->scr, VIZ_SCR_SIZE);
   else
     memset(p + off, 0, VIZ_SCR_SIZE);
+  viz_last_scr_hash = viz_hash_scr(oric);  /* remember the picture we just sent */
 
   for(i = 0; i < 4; i++)
     viz_write_u16_le(p + off + VIZ_SCR_SIZE + i * 2, oric->vidbases[i]);
@@ -623,9 +641,21 @@ void viz_poll(struct machine *oric, SDL_bool running)
     return;  /* Don't build a new frame until this one is done */
   }
 
-  /* When paused, don't build new frames — the last one is still valid */
+  /* Paused (e.g. single-stepping in the debugger): the emulator isn't running frames,
+     but the rendered picture can still change — a stepped write to screen RAM or the
+     charset, or a resolution attribute that alters the next render. Push a fresh frame
+     whenever the framebuffer differs from the one we last sent, so the client's screen
+     view stays live; skip it when nothing changed (the common case) to avoid spamming
+     the full screen. */
   if(!running)
+  {
+    if(oric->scr && viz_hash_scr(oric) != viz_last_scr_hash)
+    {
+      viz_build_frame(oric);
+      viz_flush_frame();
+    }
     return;
+  }
 
   /* Throttle: only build a new frame every VIZ_FRAME_SKIP calls */
   viz.skip_counter++;
