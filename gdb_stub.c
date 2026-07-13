@@ -36,6 +36,8 @@ typedef int socklen_t;
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/select.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -1714,6 +1716,13 @@ SDL_bool gdb_stub_poll(struct machine *oric)
     {
       gdb.client_sock = newsock;
       gdb_set_nonblocking(gdb.client_sock);
+      /* Disable Nagle's algorithm: RSP is many tiny request/ack packets, and Nagle
+         combined with the peer's delayed ACK adds ~40ms latency to every exchange
+         (each memory read cost ~50ms). TCP_NODELAY sends replies immediately. */
+      {
+        int nodelay = 1;
+        setsockopt(gdb.client_sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
+      }
       gdb.rxlen = 0;
       gdb.stop_pending = SDL_FALSE;
       gdb.need_render = SDL_FALSE;
@@ -1803,4 +1812,22 @@ SDL_bool gdb_stub_is_connected(void)
 SDL_bool gdb_stub_is_listening(void)
 {
   return gdb.initialized;
+}
+
+void gdb_stub_wait_readable(int timeout_ms)
+{
+  fd_set rfds;
+  struct timeval tv;
+
+  if(!gdb.initialized || gdb.client_sock == GDB_INVALID_SOCKET)
+    return;
+
+  FD_ZERO(&rfds);
+  FD_SET(gdb.client_sock, &rfds);
+  tv.tv_sec  = timeout_ms / 1000;
+  tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+  /* Blocks (sleeps) until a command is pending or the timeout expires — returns
+     immediately on data, so no busy-spin and no per-command poll latency. */
+  select((int)gdb.client_sock + 1, &rfds, NULL, NULL, &tv);
 }

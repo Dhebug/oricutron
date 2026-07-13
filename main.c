@@ -1926,18 +1926,32 @@ static void loop_handler(void* arg)
 #else
       if(gdb_stub_is_listening())
       {
-        /* Use timeout so we can poll for GDB commands while paused,
-           and also accept new client connections promptly */
-#if SDL_MAJOR_VERSION == 1
-        if(!SDL_PollEvent(event))
+        if(gdb_stub_is_connected())
         {
-          SDL_Delay(50);
-          continue;
+          /* A debugger is attached: block on the GDB socket so a pending command
+             wakes us instantly (a step issues dozens of memory reads — at the old
+             50ms event-poll interval that was ~1s; now it's a few ms). select()
+             sleeps until data or the 20ms timeout, so there is NO busy-spin while
+             paused. Then poll SDL non-blocking for UI events. */
+          gdb_stub_wait_readable(20);
+          if(!SDL_PollEvent(event))
+            continue;
         }
+        else
+        {
+          /* Only listening (no client yet): cheap 50ms wait so we accept a new
+             connection promptly without spinning. */
+#if SDL_MAJOR_VERSION == 1
+          if(!SDL_PollEvent(event))
+          {
+            SDL_Delay(50);
+            continue;
+          }
 #else
-        if(!SDL_WaitEventTimeout(event, 50))
-          continue;
+          if(!SDL_WaitEventTimeout(event, 50))
+            continue;
 #endif
+        }
       }
       else
       {

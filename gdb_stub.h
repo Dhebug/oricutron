@@ -46,6 +46,12 @@ SDL_bool gdb_stub_is_connected(void);
 /* Returns SDL_TRUE if the GDB server is initialized (listening for connections). */
 SDL_bool gdb_stub_is_listening(void);
 
+/* Block up to timeout_ms for a pending command on the connected client socket.
+   Returns immediately when data is available (so the paused main loop answers GDB
+   commands with ~0 latency) and otherwise sleeps for the timeout (no busy-spin).
+   No-op if no client is connected. */
+void gdb_stub_wait_readable(int timeout_ms);
+
 /* Reset transient stub state after the machine is reinitialized under an attached
    client (machine-type switch): drops a dangling temp breakpoint and pending-stop
    so the stub can't hang. Safe to call unconditionally; no-op if nothing pending. */
