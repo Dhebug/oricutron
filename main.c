@@ -2220,6 +2220,17 @@ int main(int argc, char* argv[])
   _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
 #endif
 
+#ifdef WIN32
+  // Linked as a GUI app so no console window pops up next to the emulator.
+  // When started FROM a terminal, attach to it so printf diagnostics
+  // (GDB/VIZ status lines) still appear there; otherwise they go nowhere.
+  if (AttachConsole(ATTACH_PARENT_PROCESS))
+  {
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
+  }
+#endif
+
   // This should center SDL window
 #ifndef __MORPHOS__
   putenv("SDL_VIDEO_CENTERED=center");
